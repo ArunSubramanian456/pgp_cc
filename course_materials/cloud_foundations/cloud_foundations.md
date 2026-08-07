@@ -788,3 +788,118 @@ Developer wants to:
     - **DevOps** tooling
     - **Business Function as a Service**
   - Message: the cloud ecosystem is a **rich set of specialized services**, not just the IaaS/PaaS/SaaS triad.
+
+---
+
+# Price Economics, Data Velocity & Distributed Computing
+
+---
+
+**1. Profit equation and cloud costs**  
+- Everything is tied to the basic profit equation: **Profit = Revenue − Costs**.  
+- In the cloud, costs are **continuous and usage-based** (pay-as-you-go), so architecture and deployment choices (regions, instance types, scaling patterns) directly impact the “cost” term in real time.  
+- **Cloud monitoring** becomes critical: without good observability, you can’t see where money is going or keep spending optimized.
+
+**2. Pricing strategies and regional variation**  
+- Two key pricing models are discussed:
+  - **Cost-based pricing**: price = cost + margin.  
+  - **Value-based pricing**: price based on perceived customer value (Apple as an example).  
+- Whichever model you use, **cloud cost control is central** to maintaining margins.  
+- Cloud providers mirror real-world geography-based pricing: the **same AWS instance** can be cheaper in one region (e.g., Oregon) than another due to different operational costs.  
+- But you can’t pick regions on price alone:
+  - **Compliance & data residency** (HIPAA, EU regulations, etc.) can dictate where data is allowed to live.  
+  - So region choice balances **cost vs compliance/legal requirements**.
+
+**3. Data velocity, dynamic pricing, and the “Golden Triangle”**  
+- Modern digital products (especially online services) often need **dynamic pricing** and rapid reaction to market conditions to maximize margins.  
+- That demands **fast analytics over large data streams**, not just slow, nightly batch jobs.  
+- Traditional batch analytics → **stale insights**, which are too late for tactical decisions.  
+- The video frames this in terms of transforming:
+  - **Operational data** → **Tactical information** → **Strategic decisions** (the “Golden Triangle”).  
+- Cloud vendors offer **managed Big Data & Analytics services** to support this, but adopting them naturally pushes you into **distributed computing**.
+
+**4. Distributed computing challenges in the cloud**  
+Moving into distributed systems brings several non-trivial issues:
+
+- **Heterogeneity**:  
+  - Microservices and polyglot stacks mean services written in **different languages and frameworks** must coordinate.  
+- **Faults are normal**:  
+  - In a distributed environment, components fail regularly; **fault tolerance** must be a design default, not a special case.  
+- **Consistency trade-offs**:  
+  - You often can’t have perfect, instant consistency everywhere. You must choose between **strong consistency** and **eventual consistency**, based on the business need.  
+- **Global concurrency & locking**:  
+  - Coordinating updates across multiple nodes/data centers makes things like **distributed locks** hard and error-prone.  
+- **Upgrades & maintenance**:  
+  - Managing rolling upgrades, patches, and maintenance across many nodes is complex—but cloud **managed services** reduce some of this burden with provider-handled maintenance windows.
+
+**5. Why old patterns break in the cloud**  
+To scale horizontally and fully leverage cloud elasticity, several legacy approaches must be abandoned:
+
+- **Local file storage**:
+  - Storing files on an app server’s local disk doesn’t work when you scale out across many instances; a different instance might serve the next request.  
+  - Solution: use **storage-as-a-service** (e.g., object storage, shared storage) so data is centralized and accessible to all nodes.
+- **Sticky sessions / in-memory sessions**:
+  - Tying user sessions to a single instance breaks under load balancing and auto-scaling.  
+  - Solution: **centralized session management** (e.g., Spring Boot using Redis) so any instance can serve any request.
+- **Clock synchronization**:
+  - In distributed systems, unsynchronized clocks cause issues with logs, event ordering, and time-based algorithms.  
+  - Use protocols like **NTP** to keep node clocks aligned.
+
+**6. Lift-and-shift is not enough**  
+The closing message: simply moving VMs “as-is” to the cloud (**lift-and-shift**) usually **does not unlock cloud benefits** (cost savings, elasticity, resilience).  
+- You must **adapt architecture and code**:  
+  - Design for horizontal scaling, statelessness where possible, centralized storage/sessions, managed services, and distributed-systems realities.
+
+---
+
+# Apps for Cloud & Security Model
+
+---
+
+Key points:
+
+- **Enterprise & Cloud Alignment**
+  - Start with enterprise architecture: choose the cloud architecture pattern that fits both the app and the organization’s strategic direction.
+  - Cloud provider selection should be requirements‑driven (capabilities, stability, compliance), not based on generic preference.
+
+- **Migration & Integration**
+  - Treat migration as a business process decision: moving one component or the whole process affects upstream/downstream systems.
+  - Integration impact can “make or break” a migration; you must understand how remaining on‑prem parts interact with the new cloud parts.
+
+- **Security in Hybrid Environments**
+  - Hybrid setups (some on‑prem, some in cloud) introduce complex security boundaries.
+  - Define security policy clearly and understand split ownership between customer and provider.
+  - Policy differences are especially critical in regulated industries like finance.
+
+- **Application Architecture Patterns**
+  - Stateless components are preferred for cloud because they allow horizontal elasticity and easy scaling.
+  - Stateful components can require session affinity (“sticky sessions”), which limits scalability.
+  - Microservices allow decomposition of monoliths so individual services can scale and evolve independently.
+  - Operational control is decentralized: multiple consoles (infra, app, data). Over‑centralizing into “one portal” can hide important nuances.
+
+- **Reliability & Distributed Operation**
+  - Design for non‑availability: assume components will fail and avoid single points of failure.
+  - Resilience is an architectural responsibility, not just an ops afterthought.
+
+- **Identity & Access Management**
+  - IAM in the cloud is fragmented: LDAP, cloud‑native IAM (e.g., IAM roles, policies), and third‑party identity providers.
+  - Classical, seamless SSO across everything is often unrealistic; you manage multiple credential/identity strategies.
+
+- **Service Placement & Data Architecture**
+  - Put each function into the right cloud service (e.g., databases designed for high write vs. read patterns, caching layers, etc.).
+  - Poor placement (like maintaining session state in ways that require stickiness) hurts scalability.
+  - Data federation is hard when both cloud and on‑prem act as sources of truth—you need a deliberate design for a unified, consistent view.
+
+- **Security Practices & Shared Responsibility**
+  - OAuth 2 is emphasized for secure third‑party integrations (delegated access without sharing passwords).
+  - Shared responsibility model:
+    - Provider: “security *of* the cloud” (infrastructure, core services).
+    - Customer: “security *in* the cloud” (config, identities, data, app logic).
+  - Car rental analogy: provider supplies a secure car, but you drive responsibly and lock it.
+  - Use provider tools for continuous security assessment and recurring checks.
+
+- **Programming Languages**
+  - Language choice is driven by use case and ecosystem, not by cloud platform itself.
+  - Common languages in cloud apps: Python, Java, JavaScript, Go, each with strong cloud tooling and frameworks.
+
+---
