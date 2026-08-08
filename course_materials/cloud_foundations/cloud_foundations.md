@@ -959,3 +959,11 @@ Key points:
   - **ROI as a journey**: continuously measure cost, performance, and business impact rather than assuming cloud automatically saves money.
 
 ---
+
+# Mentored Learning Session 1 - Cloud Foundations
+
+**Services Comparison across different cloud providers**
+- https://medium.com/@mohsho10/aws-azure-google-cloud-service-comparison-c8b3e6eafaa
+
+**AWS Migration Strategies**
+- https://www.stormit.cloud/blog/6-rs-aws-migration-strategies/
