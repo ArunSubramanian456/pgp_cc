@@ -148,3 +148,97 @@ AWS Global Infrastructure is organized so your applications can be fast, resilie
   - **Wavelength Zones**: Embed AWS compute and storage **inside 5G networks**, enabling **ultra‑low‑latency mobile edge** applications.
 
 ---
+
+# Understanding the real cloud 
+
+--- 
+
+- **Availability zones as the playground**  
+  - You deploy apps and databases inside availability zones by combining compute, storage, networking, security, monitoring, etc.  
+  - The service catalog in a zone constantly changes: new services and features are added, some are retired, all driven by customer needs and provider roadmaps.
+
+- **Technology stack as layers (the “burger” analogy)**  
+  - A stack is made of layered components, each doing its part to host and operate applications.  
+  - You pick and combine different cloud services to build these layers.
+
+- **The “real cloud” = APIs**  
+  - The core of cloud is the API layer providers build.  
+  - These APIs expose all the services needed to manage data-center-like capabilities programmatically.  
+  - The focus isn’t on whether APIs are “nice,” but that they give you the capabilities to build and run infrastructure.
+
+- **Different ways to consume the APIs (not just coding)**  
+  - **Web Management Console**  
+    - Easiest to start with; very convenient UI.  
+    - UI changes a lot over time, but core workflows remain, like in ecommerce sites → you should focus on *what you’re trying to do* rather than exact screen layouts.
+  - **SDKs**  
+    - Libraries in many languages.  
+    - More stable than the console.  
+    - Best for automation and embedding cloud operations into your own apps or workflows (e.g., granting access that auto-expires in 8 hours).
+  - **CLI (Command Line Interface)**  
+    - Good for scripting, automation, monitoring, and operations.  
+    - Commands are stable, so scripts can keep running for years, giving high ROI.
+  - **Third-party tools**  
+    - Many tools exist, but under the hood they usually call the same SDKs/CLIs/APIs.
+
+- **Console evolution and stable anchors**  
+  - AWS console examples (2012–2018) show huge growth in services and multiple UI redesigns.  
+  - Core services (like EC2) persist even while the look and feel change.  
+  - You should rely on stable console anchors:  
+    - Global search  
+    - Services menu  
+    - Region selector (including compliance-driven choices, like keeping data in US regions for HIPAA).
+
+Overall, the lesson reframes cloud as a fast-evolving API-powered platform, where you assemble layered stacks using services accessed through consoles, SDKs, CLIs, or tools—focusing on stable workflows and capabilities rather than specific UI details.
+
+---
+
+# EC2 - Core Features
+
+---
+
+1. **Virtual machines & placement**
+   - “Virtual machine,” “virtual server,” and “instance” are used interchangeably.
+   - Placement matters: you choose a **region** and **availability zone (AZ)**, and then AWS launches your instance in a specific AZ.
+   - Region choice is critical for **regulatory compliance** (e.g., health care data must stay in certain geographic locations).
+
+2. **Tags**
+   - **Tags = key–value labels** on instances (e.g., `stack=production`, `owner=DbAdmin`).
+   - Used for **organization, ownership, environment tracking**, and **filtering** in the console when you have many instances.
+
+3. **Instance types**
+   - Instance type = the **hardware profile** (vCPU, memory, storage, networking).
+   - Grouped into families:
+     - **General purpose**
+     - **Compute optimized**
+     - **Memory optimized**
+     - **Storage optimized**
+   - There are **current** and **previous generation** instances; older ones remain available for a long time to support gradual migration.
+
+4. **AMI (Amazon Machine Image) / Operating system**
+   - You pick an **AMI** to define the OS and base software for the instance.
+   - Can be:
+     - Standard Linux/Windows images
+     - AWS or third‑party AMIs from the **Marketplace**
+   - Key to **lift‑and‑shift**: you can create an AMI from an on‑prem server and launch that same image in AWS with minimal changes.
+
+5. **Storage – EBS volumes**
+   - EC2 storage is typically **EBS volumes**, which behave like **disks attached to a laptop/server**.
+   - Best practice: use **multiple volumes** (e.g., separate volume for database data vs. OS) for performance, backup, and management flexibility.
+
+6. **Networking – VPC, subnets, ENIs**
+   - Instances run inside a **VPC** (your private virtual network in AWS).
+   - **Subnets** live inside a VPC and each subnet maps to a **single AZ**.
+   - Each instance gets an **Elastic Network Interface (ENI)**:
+     - Has a **primary ENI** that cannot be removed.
+     - You can attach **multiple ENIs** for scenarios like traffic isolation, multi‑homed network setups, or distributed databases.
+
+7. **Security – security groups & key pairs**
+   - **Security groups** are **stateful virtual firewalls**:
+     - Rules specify **protocol, port, and source** (e.g., allow SSH from your office IP only).
+   - **Key pairs**:
+     - Used for **SSH authentication** (PEM file for Linux) instead of passwords.
+     - Private key is **downloaded once**; AWS only keeps the public key.
+
+---
+
+
