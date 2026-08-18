@@ -240,5 +240,160 @@ Overall, the lesson reframes cloud as a fast-evolving API-powered platform, wher
      - Private key is **downloaded once**; AWS only keeps the public key.
 
 ---
+# Elastic Load Balancers
+
+----
+
+Elastic Load Balancers (ELB) sit in front of your application servers and intelligently distribute incoming traffic so no single backend instance is overwhelmed, improving both availability and scalability.
+
+Key points from the video:
+
+- **Core purpose & analogy**
+  - A load balancer distributes user requests across multiple backend servers (“targets”) so traffic isn’t skewed to just a few.
+  - Like a restaurant host seating guests evenly so some tables aren’t overloaded while others sit empty.
+
+- **Traffic, targets, and flexibility**
+  - “Traffic” = requests from browsers/devices; “targets” = typically a fleet of servers (e.g., EC2 instances), not just one.
+  - It uses algorithms to decide which server handles each connection and keeps a registry of eligible targets.
+  - You can add/remove backend servers over time, allowing dynamic scaling.
+
+- **Scalability and high availability**
+  - The load balancer itself must scale with varying request rates and must not become a single point of failure.
+  - AWS ELB:
+    - Distributes traffic to targets (e.g., EC2) across multiple Availability Zones.
+    - Uses **health checks** so only healthy instances receive traffic.
+    - Is implemented in a distributed, multi-AZ way to improve resilience.
+
+- **Internal vs internet-facing**
+  - **Internet-facing ELB**: entry point for external clients (users on the internet).
+  - **Internal ELB**: used for service-to-service communication inside your VPC, keeping internal APIs highly available without public exposure.
+
+- **Deployment strategies**
+  - ELBs can support **canary deployments** by sending only a portion of traffic to a new version of a service, enabling gradual rollouts and safer releases.
+
+- **Security features**
+  - Can inspect traffic at the packet/connection level to block malicious TCP traffic before it reaches your apps.
+  - Can integrate with identity providers and handle OAuth-based authentication at the load balancer layer, offloading auth from your application code.
+
+- **Service family**
+  - “Elastic Load Balancer” is an umbrella term for multiple AWS load balancing services, each tailored to different use cases, and AWS continues to evolve these offerings over time.
+  - Application LB, Network LB, Gateway LB
+
+
+---
+
+# Application Load Balancers
+
+---
+
+Application Load Balancer (ALB) is a Layer 7 (HTTP/HTTPS) load balancer in AWS designed to route web traffic intelligently using application-level data, while maintaining high availability.
+
+Core ideas:
+
+- **Layer 7 / HTTP-aware**
+  - Operates at the application layer (HTTP/HTTPS), so it understands URLs, headers, methods, cookies, etc.
+  - This lets it make smarter routing decisions than a simple TCP load balancer.
+
+- **Listener, rules, and target groups**
+  - A **listener** (e.g., port 80/443) receives incoming requests.
+  - **Rules** evaluate parts of the request (path, host, headers, etc.).
+  - Based on rules, ALB forwards traffic to different **target groups** (collections of EC2 instances, IPs, Lambda, containers).
+
+- **Advanced routing**
+  - **Path-based routing** (e.g., `/api/*` → API service, `/images/*` → image service).
+  - **Host-based routing** (e.g., `api.example.com` vs `app.example.com`).
+  - Supports microservices and monolith-splitting by directing different request types to different backends.
+
+- **Integration with containers & microservices**
+  - Works tightly with ECS / EKS:
+    - Can target **IP addresses and ports**, enabling dynamic port mapping.
+    - Multiple tasks/containers on one instance can register as separate targets.
+  - Ideal for service-oriented backends where services scale independently.
+
+- **Health checks & high availability**
+  - Health checks use HTTP responses (e.g., `200`/`204` = healthy, `500` = unhealthy).
+  - Unhealthy instances are removed from rotation, protecting users from bad responses.
+  - Health endpoints can implement **back pressure**: when overloaded, an instance can temporarily report “unhealthy” to shed load, then return to “healthy” once it recovers.
+  - Each target group has its own health checks (e.g., `/health` endpoint).
+  - Only healthy targets receive requests; unhealthy ones are automatically avoided.
+  - Like other ELBs, it’s deployed across multiple AZs for resilience.
+
+- **Security and TLS termination**
+  - Can **terminate SSL/TLS** at the load balancer, offloading certificate management from your app servers.
+  - Integrates with **Security Groups**, AWS WAF, and IAM/ACM for certificates.
+  - Supports features like **redirects** (HTTP→HTTPS) and fixed-response rules.
+
+- **Authentication & offloading features**
+  - ALB can handle **OAuth-style login flows** (e.g., “Sign in with Google”) directly.
+  - This offloads user authentication from application code, reducing boilerplate and letting developers focus on business logic.
+  - Can integrate with identity providers (Cognito, OIDC, etc.) to handle **user authentication** at the edge.
+  - This offloads auth logic from your applications and centralizes it at the ALB.
+
+- **Observability**
+  - Emits **CloudWatch metrics**, **access logs**, and supports **request tracing headers**, which is useful for debugging microservices.
+
+- **Cross-zone load balancing**
+  - Helps even out load across all instances in all AZs, not just per-AZ.
+  - Also helps keep serving traffic when instances in one AZ fail.
+  - But it does **not** remove the impact of a full AZ outage—capacity still needs to be balanced across zones.
+
+---
+
+# System Architecture - Reverse Proxy vs Api Gateway vs Application Load Balancers 
+---
+
+**Reference** - https://www.youtube.com/watch?v=-R5ak7-LiVY
+
+## System Architecture Overview
+In modern backend system design, reverse proxies, load balancers, and API gateways form a progressive spectrum of edge management components. While these tools sit between clients and backend applications, they address distinct challenges related to CPU offloading, horizontal scaling, and microservice governance.
+
+## Core Infrastructure Components
+- **Reverse Proxy:** Acts as an edge buffer on behalf of backend servers. Its primary responsibility is handling resource-heavy network edge tasks before traffic reaches the core application logic.
+
+  - SSL/TLS Termination: Offloads CPU-intensive cryptographic handshakes and validation from backend servers.
+
+  - Caching & Compression: Serves static or repeated responses directly from memory and applies algorithms like Gzip or Brotli to diminish bandwidth usage.
+
+  - Edge Security: Hides internal server IP addresses, mitigating direct exposure to scans, probes, or malicious traffic.
+
+- **Load Balancer:** Extends reverse proxy capabilities by adding intelligent traffic distribution and state monitoring across server pools.
+
+  - Traffic Distribution: Routes requests across multiple instances using algorithms like Round-Robin, Least Connections, or Weighted Distribution to optimize capacity utilization.
+
+  - High Availability: Uses active health-check pings to identify failing or unresponsive instances, automatically removing them from the pool without interrupting user connections.
+
+  - OSI Layer Routing: Operates at either Layer 4 (TCP/UDP transport level for ultra-high throughput without payload inspection) or Layer 7 (HTTP/HTTPS application level for content-aware routing).
+
+- **API Gateway:** Sits at the highest level of abstraction, acting as a centralized policy enforcement layer designed for microservice architectures.
+
+  - Centralized Governance: Handles cross-cutting concerns like JWT validation, API key authentication, and permission checks in one location rather than duplicating logic across every service.
+
+  - Traffic Management: Enforces rate-limiting quotas, request throttling, and billing tier restrictions at the platform perimeter.
+
+  - Service Abstraction: Manages API versioning, request/response transformations (e.g., JSON to XML), and telemetry logging across multiple teams.
+
+## Layer 4 vs. Layer 7 Balancing
+- **Layer 4 (Transport Level):** Focuses strictly on IP addresses, TCP/UDP connections, and ports. Because it avoids inspecting HTTP payloads, it offers maximum speed, sub-millisecond latency, and ultra-high throughput.
+
+- **Layer 7 (Application Level):** Inspects the HTTP payload, headers, cookies, and URL paths. It enables intelligent content-based routing (e.g., directing /users and /payments to different backend clusters) at the cost of slight parsing overhead.
+
+## Layered Production Pattern
+Rather than choosing a single technology, enterprise production systems layer these components sequentially:
+
+  - CDN: Globally distributed edge reverse proxies cache static assets and terminate TLS closest to the user.
+
+  - API Gateway: Enforces perimeter policies, authenticates users, and validates rate limits.
+
+  - Load Balancers: Distribute sanitized requests across internal server clusters dedicated to specific microservices.
+
+  - Internal Proxies: Sidecars (e.g., Envoy or NGINX) manage internal service-to-service communications and intra-mesh security.
+
+## Selection Criteria
+- Choose a Reverse Proxy when running a monolith that requires basic edge optimizations (SSL termination, static caching, IP masking).
+
+- Add a Load Balancer when horizontally scaling across multiple servers to ensure high availability and load distribution.
+
+- Adopt an API Gateway when managing complex microservices, external APIs, or multi-tenant systems requiring centralized security and policy enforcement.
+---
 
 
