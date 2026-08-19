@@ -396,4 +396,310 @@ Rather than choosing a single technology, enterprise production systems layer th
 - Adopt an API Gateway when managing complex microservices, external APIs, or multi-tenant systems requiring centralized security and policy enforcement.
 ---
 
+### Network, Gateway Load Balancer
 
+---
+
+Network Load Balancer (NLB) and Gateway Load Balancer (GWLB) are Elastic Load Balancing services focused on **network-layer** traffic, prioritizing performance and packet inspection over application-aware routing.
+
+**Network Load Balancer (NLB)**
+
+- **Layer & protocols**
+  - Operates at **Layer 4 (Transport)** of the OSI model.
+  - Handles **TCP and UDP**, making it suitable for games, voice calls, and other latency‑sensitive or high‑throughput workloads.
+
+- **Core structure (similar to ALB)**
+  - Uses **listeners** on configurable ports.
+  - Routes to **target groups** that typically contain EC2 instances.
+  - Same basic building blocks as ALB, but different behavior and capabilities.
+
+- **Connection behavior & performance**
+  - Once a client connection is established to a target EC2 instance, that **same instance is used for the life of the connection**.
+  - Only when the connection closes/drops and a new one is made might traffic go to a different instance.
+  - This avoids per‑request re‑selection and round‑robin overhead, boosting performance.
+  - Recommended for very high throughput scenarios, e.g. **around 1M requests per second**.
+
+- **Target selection**
+  - Uses a **Flow Hash** algorithm (e.g., combining source IP, destination IP, ports) to decide which instance gets the connection.
+  - This keeps flows stable and efficient.
+
+- **What it does *not* do**
+  - No **path-based routing** or host-based routing.
+  - No built‑in **authentication flows**.
+  - It’s not “application aware”; it’s meant for **raw transport-level load balancing**.
+
+---
+
+**Gateway Load Balancer (GWLB)**
+
+- **Purpose & pattern**
+  - Designed for **inline traffic inspection** using the “**bump in the wire**” model.
+  - Intercepts packets, sends them to security appliances, drops malicious traffic, and passes clean traffic onward.
+
+- **Traffic flow**
+  1. Traffic is intercepted via a **Gateway Load Balancer endpoint** (an ENI).
+  2. Packets are forwarded to **security appliances** (vendor or open-source: firewalls, IDS/IPS, etc.).
+  3. Malicious traffic can be terminated; approved packets are re‑injected into the path and delivered to the application server.
+  4. Responses typically go back **without re-inspection**, for efficiency.
+
+- **Use case**
+  - Ideal for centralizing and scaling **network security** functions without changing application code or network topology much.
+
+---
+
+**Choosing between them**
+
+- Use **ALB** when you need **HTTP-aware, path/host-based routing, and auth**.
+- Use **NLB** when you need **TCP/UDP, extreme performance, or low latency**.
+- Use **GWLB** when you need **inline security inspection** with third‑party or custom appliances.
+
+This ties into your current load balancer module as the “network-focused” side of the ELB family, complementing ALB’s application-layer capabilities.
+
+---
+
+### Open Systems Interface (OSI) Mental Model
+
+---
+The OSI model is a 7-layer framework for how data moves across networks—from an app on one device to an app on another. It’s a **mental model**, not a product, but it helps you reason about where things happen (e.g., where ALB works, where TCP works, where encryption lives).
+
+---
+
+## The 7 Layers, with clean examples
+
+### 7. Application Layer – “What the user actually uses”
+- **What it is:** The interface between the network and user applications.
+- **Think:** “What does the user think they’re doing?”
+- **Examples:**
+  - Using a web browser to open `https://example.com`
+  - Sending an email via Gmail
+  - Making an HTTP GET request in your code
+- **Protocols:** HTTP, HTTPS, SMTP, FTP, DNS, WebSocket
+- **Intuition:** When you type a URL and hit Enter, you’re interacting at Layer 7. Application logic lives here.
+
+---
+
+### 6. Presentation Layer – “Translator & formatter”
+- **What it is:** Transforms data so applications can understand it; handles formats and encryption.
+- **Think:** “Make it readable or secure.”
+- **Examples:**
+  - Converting data into JSON, XML, or HTML for an API response
+  - Encrypting/decrypting data with TLS/SSL
+  - Character encoding like UTF‑8 vs ASCII
+- **Protocols/Tech:** TLS/SSL, data serialization (JSON, XML), compression (gzip)
+- **Intuition:** Like a translator plus a security guard: it makes sure both sides speak the same “format” and that data may be encrypted.
+
+*(In practice, layers 5–7 blur together in modern systems.)*
+
+---
+
+### 5. Session Layer – “Manage conversations”
+- **What it is:** Manages sessions—long-lived logical conversations between two endpoints.
+- **Think:** “Which conversation is this part of?”
+- **Examples:**
+  - Your web app knowing you’re “logged in” via a session cookie
+  - A remote desktop session that can pause and resume
+  - A video conference call that stays established while you talk
+- **Protocols/Concepts:** Session tokens, cookies, some aspects of RPC frameworks
+- **Intuition:** Like a meeting organizer: starts, tracks, and ends conversations so both sides know which data belongs to which “session.”
+
+---
+
+### 4. Transport Layer – “Reliable delivery between two endpoints”
+- **What it is:** End‑to‑end data delivery between two hosts, including reliability and ordering.
+- **Think:** “Slice data into segments, ensure they all arrive, in order.”
+- **Examples:**
+  - TCP ensuring packets are retried if lost and reassembled correctly
+  - UDP sending video packets for a live stream without worrying about perfect reliability
+- **Protocols:** TCP, UDP
+- **Intuition:** Like a courier service:
+  - **TCP:** Registered mail—tracks every letter, resends if lost, ensures order.
+  - **UDP:** Postcards—fast and simple, may be lost, no tracking, but good enough for streaming.
+
+---
+
+### 3. Network Layer – “Find the path between networks”
+- **What it is:** Routing packets from one network to another using logical addresses.
+- **Think:** “Given these two IPs, how do we get from here to there?”
+- **Examples:**
+  - Your laptop (192.168.1.10) sending a packet to a server (54.23.x.x) on the internet
+  - Routers deciding which next hop to send packets to
+- **Protocols:** IP (IPv4, IPv6), ICMP (ping), routing protocols (BGP, OSPF)
+- **Intuition:** Like a GPS/road system: IP address = destination address; routers = intersections that choose the next road.
+
+---
+
+### 2. Data Link Layer – “Communication on the same local network”
+- **What it is:** Moves frames between devices on the same physical network (same switch or Wi‑Fi).
+- **Think:** “Send data to that device on this LAN.”
+- **Examples:**
+  - Your laptop talking to your Wi‑Fi router using Wi‑Fi frames
+  - A switch forwarding Ethernet frames based on MAC addresses
+- **Protocols/Tech:** Ethernet, Wi‑Fi (802.11), ARP
+- **Intuition:** Like apartment delivery:
+  - IP is the street address (Layer 3),
+  - MAC address is the **apartment number** (Layer 2) used inside the building (LAN).
+
+---
+
+### 1. Physical Layer – “Raw bits over a medium”
+- **What it is:** The actual physical transmission of bits (0s and 1s).
+- **Think:** “Electric signal / radio wave / light on fiber.”
+- **Examples:**
+  - Electrical pulses on an Ethernet cable
+  - Radio waves from your Wi‑Fi antenna
+  - Light pulses in a fiber‑optic cable
+- **Tech:** Cables, NICs, fiber, Wi‑Fi radios, voltage levels
+- **Intuition:** Like the physical road or wires themselves that carry the cars/letters.
+
+---
+
+## One concrete end‑to‑end story
+
+Imagine you open `https://shop.example.com/orders` in your browser:
+
+1. **Application (7)**: Browser forms an HTTPS request: `GET /orders HTTP/1.1` with cookies, headers.
+2. **Presentation (6)**: Request is encoded in HTTP text, then encrypted using TLS.
+3. **Session (5)**: Your login session is represented with a cookie; the connection may be kept alive across multiple requests.
+4. **Transport (4)**: TCP splits the encrypted data into segments, ensures reliable, ordered delivery to the server’s IP: `203.0.113.10:443`.
+5. **Network (3)**: IP routes packets across the internet from your public IP to `203.0.113.10` via multiple routers.
+6. **Data Link (2)**: On each link (your Wi‑Fi to router, router to ISP switch, etc.), Ethernet/Wi‑Fi frames move the packets hop by hop using MAC addresses.
+7. **Physical (1)**: Actual signals go over Wi‑Fi radio, copper, and fiber.
+
+On the server side, all of this unwinds in reverse, and at Layer 7 your web app finally sees: “User requested `/orders` with this cookie.”
+
+---
+
+# Feature and Cost Analysis
+
+---
+
+TThe feature and cost analysis video walks through how **target groups** and **load balancers** are configured and what that means for behavior and pricing, so you can choose and tune ELB services properly.
+
+---
+
+## 1. Target Group Features
+
+**a. Target type (what can receive traffic)**  
+When you create a target group, you pick a **target type**:
+
+- **EC2** – the common case; each instance is a target.
+- **Lambda** – for serverless backends.
+- **Load Balancer** – to **chain** load balancers (e.g., NLB in front → ALB behind).
+- **IP** – for hybrid setups, routing to on-prem / other clouds where AWS can’t manage the instances directly.
+
+Constraints and basics:
+
+- Target groups are **scoped to a single VPC**; they can’t span VPCs.
+- You must choose **protocol + port** that match how the application actually listens.
+
+---
+
+**b. Health checks (protecting user experience)**  
+Health checks decide which targets are considered healthy:
+
+- Configure:
+  - Protocol: **HTTP / HTTPS**
+  - Path: e.g. `/health`
+  - Interval & timeout
+  - Healthy / unhealthy thresholds
+  - Success codes (single or ranges, e.g. `200–299`)
+
+Why tuning matters:
+
+- **Too lenient** → unhealthy instances stay “healthy” and keep serving bad responses.
+- **Too strict** → healthy instances flap in/out, causing instability.
+
+---
+
+**c. Registration, tags, and operational attributes**
+
+- **Registering targets**:
+  - At creation or later.
+  - Manually or via automation (e.g., autoscaling).
+- **Tags**:
+  - Ownership, environment (dev/prod), cost reporting.
+
+Key target-group attributes:
+
+- **Deregistration delay (draining)**  
+  - How long to keep existing connections alive after a target is removed, so in‑flight requests finish gracefully.
+- **Slow start duration**  
+  - Gradually ramps traffic to new targets so they can warm up (caches, JIT, etc.).
+- **Load balancing algorithm**  
+  - Examples: **round-robin**, **least outstanding requests** – control how requests are distributed.
+- **Stickiness**  
+  - Important for stateful / legacy apps that rely on session affinity.
+  - Implemented via:
+    - Application cookies, or
+    - Load balancer–generated cookies.
+  - Timeouts should roughly match session duration.
+
+---
+
+## 2. Load Balancer Features
+
+**a. Core LB setup & integrations**
+
+- **Naming & tagging** for management and cost allocation.
+- **Authentication integration**:
+  - Offload OAuth / OIDC flows (e.g., “Sign in with Google”) to the load balancer.
+  - Integrate with AWS security services and identity providers.
+- **Caching/CDN integration**:
+  - Integrate with caching layers (e.g., CloudFront) to reduce global latency.
+
+---
+
+**b. Networking & availability**
+
+- **Multi–Availability Zone deployment**:
+  - Nodes placed across AZs with **ENIs** in subnets.
+- **Attributes**:
+  - **Cross-zone load balancing** – spread traffic across all healthy targets in all AZs.
+  - **Desync mitigation** – controls how strictly the LB handles malformed HTTP (trade-off between RFC strictness, security, and availability).
+
+Security & correctness:
+
+- **Rule-based routing**:
+  - Ordered conditions and actions.
+  - Depends on correct **listener ports** and **security group** rules.
+- Supports:
+  - **Weighted traffic splits** (e.g., 90/10) between target groups.
+  - **Target-group stickiness** and progressive delivery (e.g., canary deployments).
+
+---
+
+## 3. Cost Model (how you pay)
+
+Two big components:
+
+1. **Fixed hourly fee**  
+   - Per load balancer (ALB/NLB/GWLB hour) just to have it running.
+
+2. **Usage-based (LCU-style) charges**  
+   - Billed on the **maximum** of four metrics:
+     - **Rule evaluations**
+     - **New connections**
+     - **Active connections**
+     - **Processed bytes**
+
+Implications:
+
+- Complex rule sets and heavy traffic can increase **rule evaluations**.
+- Spiky connection patterns can push **new connections** high.
+- Streaming / long-lived connections increase **active connections**.
+- High data volume raises **processed bytes**.
+
+Monitoring these metrics is essential for:
+
+- Understanding which dimension is driving cost.
+- Estimating expenses under variable workloads.
+- Deciding if you should optimize rules, connection reuse, or data transfer.
+
+---
+
+In summary:  
+- **Target group features** control *what* you send traffic to and how safely (health checks, draining, stickiness).  
+- **Load balancer features** control *how* traffic is routed, secured, and made highly available.  
+- **Cost** is driven by the LB type you choose plus how intensively you use rules, connections, and bandwidth.
+
+---
