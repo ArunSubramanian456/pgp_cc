@@ -703,3 +703,72 @@ In summary:
 - **Cost** is driven by the LB type you choose plus how intensively you use rules, connections, and bandwidth.
 
 ---
+
+# Differences between EC2 Session Affinity and Target Group Stickiness
+
+## Scope of Routing:
+- **Session Affinity (Target Stickiness)**: Keeps a user locked to a single EC2 instance, container, or IP address inside a specific target group.
+- **Target Group Stickiness**: Keeps a user locked to one specific pool/group of targets (e.g., sticking to Target Group A instead of shifting to Target Group B during a weighted rollout).
+
+## Layer/Mechanism:
+- **Session Affinity**: Can use application cookies, load-balancer generated cookies (ALB), or source IP routing (NLB) to find the exact compute resource.
+- **Target Group Stickiness**: Managed at the load balancer listener/routing rule level using stickiness configurations across weighted target groups.
+
+## Primary Use Case:
+- **Session Affinity**: Preserving local server-side states like shopping carts or in-memory user sessions when apps are not fully stateless.
+- **Target Group Stickiness**: Managing canary or blue/green deployments so a user doesn't bounce between different versions of an application mid-session
+
+---
+
+# Use cases [101-104]
+
+---
+The “use cases” video shows how you can use **Application Load Balancers and target groups as a control plane for gradual cloud adoption and modernization**, rather than doing a big-bang rewrite.
+
+### 1. Simple lift-and-shift to the cloud
+- Start with an existing on‑prem app you don’t want to rewrite.
+- Deploy it to a couple of EC2 instances and put an **ALB in front**:
+  - Port 80 listener → default rule → **single target group** with those 2 instances.
+  - Minimal code change: add a **health check endpoint**.
+- Result: you get a first “cloud foothold” plus easier deployment, scaling, and management, without redesigning the app.
+
+### 2. Incremental modernization with path-based routing
+- Keep the old app running, but build a **new “order service”** as a separate service:
+  - New target group for `order-service`.
+  - **Path-based routing**: `ALB` routes `/order/*` to the new target group, everything else to the legacy app.
+- The legacy app stays mostly untouched, while specific capabilities are replaced and tested in isolation.
+
+### 3. Canary releases with ALB
+- Instead of blue‑green’s all‑at‑once cutover, **Canary Release** sends only a slice of traffic to the new version first:
+  - Example: for `/order/*`, send **90%** of traffic to the old version’s target group, **10%** to the new version’s target group.
+- Benefits:
+  - Test new version under **real production load**.
+  - Slowly ramp traffic up while watching **EC2 + ALB metrics**.
+  - Can **roll back quickly** if issues appear.
+- Constraints / downsides:
+  - Requires **backward compatibility**, especially in DB schema and contracts.
+  - You run and manage **multiple versions** at once.
+  - Longer test window and **higher infra cost** during overlap.
+
+### 4. Moving from stateful monolith to more cloud-native
+- Many legacy apps depend on **in‑memory session state** (e.g., shopping carts) → need stickiness.
+- Modernization step:
+  - Move session data into a **central cache** (e.g., Redis/Elasticache) so app instances become more **stateless**.
+  - This reduces or removes the need for strict session stickiness and makes scaling & deployments easier.
+
+### 5. Internal services and hybrid patterns
+- **Internal-only services**:
+  - Put backend services behind an **internal (private) load balancer**, accessible only within the VPC.
+- **Hybrid integration**:
+  - Register **on‑prem IPs** as targets in a target group.
+  - Use VPN/Direct Connect to integrate, e.g., a dispatch system still running in the data center.
+  - ALB/NLB then route traffic to those on‑prem IP targets as if they were just more backend servers.
+
+### 6. Overall pattern: Strangler Pattern via load balancing
+- The video ties all these together as **“baby steps” modernization**:
+  - Start with lift‑and‑shift.
+  - Introduce new services behind new target groups.
+  - Use **routing rules and weighted splits** to gradually move functionality and traffic.
+- This is essentially the **Strangler Pattern**: over time, the old monolith is surrounded and replaced by new services, with the load balancer acting as the switchboard that controls the evolution.
+
+---
