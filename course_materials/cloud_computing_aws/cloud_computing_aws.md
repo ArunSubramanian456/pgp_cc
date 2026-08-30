@@ -240,6 +240,7 @@ Overall, the lesson reframes cloud as a fast-evolving API-powered platform, wher
      - Private key is **downloaded once**; AWS only keeps the public key.
 
 ---
+
 # Elastic Load Balancers
 
 ----
@@ -772,3 +773,1112 @@ The “use cases” video shows how you can use **Application Load Balancers and
 - This is essentially the **Strangler Pattern**: over time, the old monolith is surrounded and replaced by new services, with the load balancer acting as the switchboard that controls the evolution.
 
 ---
+
+# Introduction to IAM
+
+--- 
+
+The “Introduction to IAM” video explains **why IAM exists** and how it fits into AWS’s overall security model, then defines identity, access, and least privilege.
+
+### 1. Shared Responsibility Model: who secures what?
+
+- **Goal:** Avoid security gaps from wrong assumptions—AWS and the customer each have clearly defined roles.
+- **AWS (“security OF the cloud”)**:
+  - Secures the **global infrastructure**: data centers, Regions, physical hardware.
+  - Handles physical security (perimeter controls, access control, environmental systems).
+  - Keeps underlying hardware/software patched and highly available.
+  - Data center locations are not publicly disclosed; access is strongly limited (analogy: a house with three rooms where no one has keys to all rooms).
+- **Customer (“security IN the cloud”)**:
+  - Secures **what you run and store** on AWS:
+    - OS configuration, applications, firewalls.
+    - Data at rest and in transit (e.g., to/from EC2).
+  - Manages **user access control** and **compliance** with laws and regulations.
+
+Core message: security is a **partnership**—AWS gives you a secure base, but you must configure and operate securely on top of it.
+
+---
+
+### 2. What is IAM in this context?
+
+IAM (Identity and Access Management) is the **core service** that helps customers fulfill their side of the Shared Responsibility Model.
+
+- **Identity**:
+  - A unique digital representation of a person or system.
+  - Verified and described by attributes like:
+    - Username, password.
+    - Email, employee ID.
+    - Team/role membership (e.g., “DevOps”, “Finance”).
+- **Access**:
+  - Defined via **policies** that say *who* can do *what* in an AWS account.
+  - Example: “This role can read from S3 bucket X, but cannot delete objects.”
+
+---
+
+### 3. Key security principles: least privilege and AAA
+
+- **Least privilege**:
+  - Start from **default deny**.
+  - Grant only the **minimum permissions** needed to perform a task.
+  - Reduces blast radius if a user is compromised or makes a mistake.
+
+- **IAM underpins:**
+  - **Authentication** – verifying *who* is calling (user, role, service).
+  - **Authorization** – deciding *what* they’re allowed to do (based on policies).
+  - **Auditing** – tracking *who did what, when*:
+    - Crucial for compliance, incident investigation, and detecting misuse.
+
+---
+
+# IAM Concepts and Accessing IAM
+
+---
+
+“IAM Concepts and Accessing IAM” explains the core mental model of AWS access control—how services, resources, actions, and principals fit together—and how users actually interact with IAM via different access paths.
+
+---
+
+## 1. Services, resources, and actions: the IAM mental model
+
+- **Services vs. resources**
+  - **Service** = broad capability (e.g., EC2, S3, RDS) – like the **car**.
+  - **Resources** = specific items inside a service that you manage – like the **engine, transmission, wheels**.
+  - Example:
+    - Service: **EC2**
+    - Resource: **a specific EC2 instance** (e.g., `i-0123456789abcdef0`).
+  - Permissions must be applied at the **resource** level, because that’s what you actually want to protect.
+
+- **Service categories**
+  - Services are grouped functionally:
+    - **Compute** (EC2, Lambda)
+    - **Storage** (S3, EBS)
+    - **Database** (RDS, DynamoDB)
+    - **Networking** (VPC, ELB)
+  - They act as **building blocks**:
+    - Simple: compute + database.
+    - Complex: dozens of services combined in larger environments.
+
+- **Amazon Resource Names (ARNs)**
+  - **ARNs** uniquely identify resources and are used in IAM for access control.
+  - They encode:
+    - Service (e.g., `ec2`)
+    - Region (e.g., `us-east-1`)
+    - Account ID
+    - Resource type & ID (e.g., instance ID)
+  - This precision lets policies say: “Allow this action on **this exact resource**.”
+
+- **Actions / operations**
+  - **Actions** are the allowed operations on resources:
+    - View, create, modify, delete, tag, etc.
+  - Each service defines its own actions.
+    - Example: IAM has ~40 user-focused actions.
+  - Hierarchy:
+    - **Service → Resources → Actions**
+    - IAM’s job: control **which principals** can perform **which actions** on **which resources**.
+
+---
+
+## 2. Principals, credentials, and requests
+
+- **Principals (the “who”)**
+  - Entities that make requests to AWS:
+    - AWS accounts
+    - **IAM users**
+    - **IAM roles**
+    - **AWS services** acting on your behalf
+  - Credential styles:
+    - **Root user / IAM users**: long‑lived (permanent) credentials.
+    - **Roles**: **temporary credentials**, assumed when needed (more secure, recommended).
+
+- **Requests (what actually happens)**
+  - A **request** to AWS includes:
+    - Principal (who)
+    - Resource (what it’s targeting)
+    - Action (what it wants to do)
+    - Additional data (e.g., tags, parameters)
+  - Examples:
+    - Tag an EC2 instance.
+    - “John Doe requests `ec2:RunInstances`.”
+
+- **Authentication vs. authorization**
+  - **Authentication**: verify *who* is calling (passwords, access keys, etc.).
+  - **Authorization**: decide *what* they’re allowed to do, using **policies**.
+  - AWS uses **default deny**:
+    - Everything is denied unless a policy **explicitly allows** it.
+    - This supports **least privilege**.
+
+- **Workloads**
+  - A **workload** = a collection of resources and applications delivering business value.
+  - Scale:
+    - Small business: a few resources.
+    - Enterprise: thousands of resources and many workloads.
+  - Consistent IAM practices are critical as this scale grows.
+
+---
+
+## 3. How people and systems access IAM
+
+IAM is the **common control layer** no matter how you interact with AWS:
+
+- **Console (web UI)**
+  - Example: Bob logs into the AWS Management Console with a username/password and MFA.
+  - Ideal for **interactive**, human-driven tasks.
+
+- **CLI (Command Line Interface)**
+  - Uses **access key ID + secret access key**.
+  - Best for **automation** and scripting (e.g., CI/CD pipelines, admin scripts).
+
+- **SDKs / APIs**
+  - Applications use AWS SDKs (Python, Java, JS, etc.) to call AWS programmatically.
+  - Good for building apps that integrate deeply with AWS services.
+
+In all cases, IAM is evaluating **who** is calling, **which resource** they’re targeting, **which action** they’re requesting, and **whether any policy allows it**, under a default-deny, least-privilege model.
+
+---
+
+# IAM Core Features
+
+---
+
+The “IAM Core Features” video outlines the main building blocks of IAM and how they work together as a stable, foundational access control system in AWS.
+
+**1. IAM as a stable foundation**
+- IAM’s core concepts don’t change often, even if small features are added.
+- It’s the **central access control layer** integrated with virtually every AWS service.
+
+---
+
+## 2. Core IAM building blocks
+
+**a. Groups – permission containers for users**
+- **User groups** are “containers” for users who need similar permissions.
+- Example: a **“developers” group** with access to specific services/resources.
+- You assign policies to the group once, instead of managing permissions per individual.
+- This makes permission management more scalable and easier to audit.
+
+**b. Users – individual identities**
+- **IAM users** are distinct digital identities:
+  - Usually represent **people**, sometimes specific **systems**.
+- Each has its own credentials:
+  - Username/password (for console access).
+  - Access keys (for CLI/SDK access).
+- This enables controlled **authentication** and **authorization** per person or system.
+
+**c. Root user – special, permanent account owner**
+- Created when the AWS account is created.
+- Cannot be deleted.
+- Has **full, unrestricted permissions**.
+- Must be protected very carefully (strong password, MFA, minimal usage).
+
+**d. Roles – permissioned identities without long-term keys**
+- **Roles** are identities with a set of permissions that:
+  - Can be assumed by users, services (like EC2, Lambda), or other AWS accounts.
+  - Use **temporary credentials** (no permanent access keys to share).
+- Enables secure access without sharing passwords or long-lived keys.
+
+**e. Policies – the heart of IAM**
+- **Policies** define **allow/deny rules**:
+  - Which actions are allowed or denied.
+  - On which resources.
+- Example: allow read/write/manage on specific EC2 instances.
+- Can be attached to:
+  - Users
+  - Groups
+  - Roles
+  - Sometimes directly to services (via service-linked roles).
+- Policies implement **least privilege** and are the core of authorization logic.
+
+---
+
+## 3. Security, compliance, and integration
+
+**a. MFA (Multi-Factor Authentication)**
+- Adds an extra “lock” on top of password/access key.
+- Especially critical for the **root user** (treated as mandatory best practice).
+- Reduces risk of account takeover.
+
+**b. Compliance, auditing, and least privilege**
+- IAM enables:
+  - **Fine-grained control** over who can access what.
+  - **Least privilege**: only grant the minimum permissions needed.
+  - **Auditing**: understanding who did what and when (ties into logging services).
+- This supports regulatory compliance and post-incident analysis.
+
+**c. Integrated and global, with no extra cost**
+- IAM is **integrated with all AWS services out of the box**, so you don’t maintain separate access systems per service.
+- It’s **global** (not region-bound like EC2) and **free**—you pay for the resources you protect, not for IAM itself.
+
+Overall, the video frames IAM as a stable, universal control plane: groups, users, roles, and policies define access; MFA and auditing harden security; and IAM’s global, no-cost nature makes it the default way to manage permissions across your AWS environment.
+
+---
+
+# IAM Identity Center
+
+---
+The IAM Identity Center video explains how AWS structures identities and permissions so users get **exactly the access they need—no more, no less**—and how Identity Center helps manage this at scale across accounts and applications.
+
+---
+
+## 1. Principals and the root user
+
+- **Users as principals**
+  - A **user** is a principal that can sign in and make requests.
+  - Principals include:
+    - The **root user**
+    - **IAM users**
+    - **Roles** (when assumed)
+- **Root user**
+  - Created automatically with the AWS account.
+  - Has **full access to all services and resources**.
+  - Very powerful and high‑risk:
+    - Best practice: **do not use root for daily tasks**.
+    - Instead, create **IAM users** with only the permissions they need.
+    - Even an “admin” IAM user is **not equal to root** (root has special capabilities like closing the account, changing billing, etc.).
+
+---
+
+## 2. IAM users and IAM Identity Center
+
+- **IAM users**
+  - Represent **humans or workloads**.
+  - Can have:
+    - Console credentials (username/password).
+    - Programmatic credentials (access keys).
+  - Used for direct identity management within a single AWS account or smaller environments.
+
+- **IAM Identity Center**
+  - Centralized solution for managing user access:
+    - Across **multiple AWS accounts**.
+    - To **external SaaS apps** (e.g., Salesforce, Microsoft 365).
+    - To **custom on‑prem applications**.
+  - Typically enabled from the **main/root account** to control a broader, “global” workforce identity set.
+  - Lets you manage who can access **which accounts and apps**, using one central identity system instead of lots of per‑account IAM users.
+
+---
+
+## 3. Groups: scaling permission management
+
+- **Groups** = collections of IAM users.
+  - Example: an **admins** group with elevated permissions.
+- You attach policies to the **group**, and users **inherit** those permissions.
+- Benefits:
+  - Easier administration and consistent access.
+  - Simple job changes:
+    - Moving someone from “developers” to “testers” = change their group membership.
+    - Old permissions are removed, new ones granted automatically.
+- Important boundary:
+  - **Groups themselves cannot authenticate.**
+  - Only **principals** (users, roles, etc.) can sign in; groups just organize permissions.
+
+---
+
+## 4. Roles: assumable identities with temporary credentials
+
+- **Roles** hold permissions but **do not** have long‑term credentials.
+- They are **assumed** to obtain **temporary security tokens**.
+- Common use cases:
+  - **People** assuming roles for admin or cross-account work.
+  - **AWS services** (e.g., an EC2 instance running an app) assuming a role to access S3, DynamoDB, etc.
+- This avoids sharing long‑lived keys and supports more secure, short‑lived access.
+
+---
+
+## 5. Policies: how permissions are expressed
+
+- **Policies** are JSON documents with **Allow** / **Deny** statements.
+- Guided by **least privilege**:
+  - Default is **deny**.
+  - Explicitly **allow only what’s necessary**.
+
+Types of policies:
+
+1. **Identity-based policies**
+   - Attached to users, groups, and roles.
+   - Subtypes:
+     - **AWS managed policies** – predefined by AWS.
+     - **Customer managed policies** – created and maintained by you; can be reused and composed.
+     - **Inline policies** – attached directly to a single user/group/role and live only there.
+   - Best practice:
+     - Prefer **managed policies** (AWS or customer managed) for reuse and consistency.
+     - Use **inline policies** only when you absolutely need one-off, tightly coupled permissions.
+
+2. **Resource-based policies**
+   - Attached directly to resources (e.g., S3 bucket policies).
+   - Control who can access that resource and how.
+
+---
+
+In summary, the video shows how:
+
+- **Root**, **IAM users**, **groups**, **roles**, and **policies** form the core identity and access structure.
+- **IAM Identity Center** adds a centralized, scalable layer for managing user access across many AWS accounts and external/internal applications.
+- All of this is governed by **least privilege** and clear separation of who can sign in (principals) vs. how permissions are organized (groups, roles, policies).
+---
+
+# Resource based and inline policy
+
+---
+
+Resource-based and inline policies are two ways of expressing permissions in AWS, but they attach in different places and are used for different purposes. The video explains both, plus their JSON structure and best practices.
+
+---
+
+## 1. Resource-based policies
+
+**What they are**
+
+- A **resource-based policy** is attached **directly to the resource**, not to a user/group/role.
+- The **resource itself** specifies:
+  - **Who** can access it (which principals).
+  - **What** actions they can perform.
+- The resource becomes the **central point of control**.
+
+**Key characteristics**
+
+- They are **inline to the resource**:
+  - Not “managed” separately.
+  - You cannot detach and reuse them in multiple places.
+  - To change them, you **edit the policy on the resource** itself.
+- Only **some AWS services** support resource-based policies (e.g., S3 buckets, some queues, some KMS keys), so they are **specialized**, not universal.
+
+**Primary use case: cross-account access**
+
+- Major scenario: **secure sharing between AWS accounts**.
+  - Example: An S3 bucket in Account A grants specific permissions to a role/user in Account B.
+- This keeps:
+  - Control with the **resource owner**.
+  - Explicit governance over which **external principals** can do **what**.
+
+**Identity-based vs resource-based view**
+
+- **Identity-based policy**:  
+  “User X is granted access to Resource Y” → like a **key** that opens a lock (permission travels with the identity).
+- **Resource-based policy**:  
+  “Resource Y allows access to User X” → like a **biometric lock** that knows which fingerprints are allowed (permission anchored at the resource).
+
+---
+
+## 2. Inline policies (best practices and usage)
+
+**What inline policies are**
+
+- **Inline policies** are policies that live **directly inside** a single identity (user, group, or role).
+- They are not reusable:
+  - If you delete the identity, the inline policy goes with it.
+  - You can’t share that same policy across multiple identities.
+
+**Best practices from the video**
+
+- Use **inline policies sparingly**:
+  - Prefer **managed policies** (AWS-managed or customer-managed) whenever the same permission needs to be shared across multiple users/groups/roles.
+  - This avoids duplication and inconsistent updates.
+- Follow **least privilege**:
+  - Grant the minimum required access.
+- Perform **periodic review and auditing**:
+  - Clean up outdated or over-broad inline policies.
+- **Test carefully**:
+  - Policy changes can have side effects (unexpected denies/allows), so you should verify behavior.
+- When inline policies are tied to **IAM users with access keys**, regularly **rotate keys** as part of good security hygiene.
+
+---
+
+## 3. Common JSON structure for all policies
+
+All IAM policy types (identity-based, resource-based, inline, managed) share the **same basic JSON structure**:
+
+- Top-level JSON with optional elements, plus:
+  - One or more **`Statement`** entries.
+- Each **statement**:
+  - Expresses:
+    - **Effect**: `Allow` or `Deny`
+    - **Action(s)**: what operation(s) (e.g., `s3:GetObject`, `ec2:StartInstances`)
+    - **Resource(s)**: which ARN(s)
+    - Optionally **Condition**: extra constraints
+
+**Evaluation model**
+
+- Multiple statements in a policy are combined with a **logical OR**:
+  - If **any** applicable statement allows an action (and no explicit deny overrides it), the action can be permitted.
+- This enables **fine-grained control** by composing multiple statements.
+
+**JSON literacy**
+
+- Because policies are **plain JSON**, basic JSON skills are essential:
+  - Understanding **booleans**, **arrays**, **nested objects**.
+- The video uses a “John” example (with a fictitious photography club) purely to:
+  - Teach how to read and reason about JSON structure,
+  - Before applying that understanding to real IAM policy documents.
+
+---
+
+# Understanding a Policy Structure
+
+--- 
+
+The “Understanding Policy Structure” video explains **how IAM policies are built, how AWS evaluates them, and how governance tools like permission boundaries keep access under control over time**.
+
+---
+
+## 1. Policy JSON structure
+
+The video uses a real IAM policy to show how structure maps to behavior.
+
+- **Version**
+  - A policy language identifier (commonly `2012-10-17`).
+  - Indicates which policy syntax/rules apply.
+  - Kept current by AWS; tooling sets it for you—no need to tweak it manually in normal use.
+
+- **Statement (array)**
+  - The **core of the policy**—an array of one or more statements.
+  - Each **statement** is an independent rule (permission or restriction).
+  - To understand a policy, you must examine **every statement**.
+
+Each **statement** contains:
+
+- **Effect**
+  - `Allow` or `Deny`.
+  - `Deny` overrides any `Allow` if both apply.
+
+- **Action**
+  - The API operation(s) the statement touches.
+  - Can be:
+    - Explicit operations (e.g., `s3:GetObject`, `ec2:StartInstances`), or
+    - Wildcards (e.g., `s3:*` or `iam:Create*`)—which should be used carefully.
+
+- **Resource**
+  - Which resources the statement applies to, usually via **ARNs**.
+  - Can be:
+    - **Specific** (one bucket or instance).
+    - **Patterned** (a set of resources via wildcards).
+
+**Evaluation model**
+
+- Within a policy, AWS evaluates all matching statements with a **logical OR**:
+  - If any applicable statement **allows** an action (and no explicit deny applies), the policy contributes an allow.
+- Combined with other policies, you get the final decision:
+  - Start from **default deny** → add **allows** from any policy/statement → apply **denies** (which win).
+
+The video reinforces **least privilege**:
+- Grant only what is needed.
+- Regularly **review and test** policies to keep them tight and compliant.
+
+---
+
+## 2. Identity-based vs resource-based policies
+
+- **Identity-based policies**
+  - Attached to **users, groups, or roles**.
+  - Describe what that principal can do to which resources.
+
+- **Resource-based policies**
+  - Attached directly to a **resource** (e.g., S3 bucket policy).
+  - Describe who can access the resource and how.
+
+The video notes:
+
+- Some fields are **mandatory/optional** depending on:
+  - Whether it’s identity-based or resource-based.
+  - Which AWS service you’re working with.
+- Therefore, **service documentation** is your reference for exact requirements and supported actions/resources.
+
+---
+
+## 3. Permission boundaries: capping maximum permissions
+
+A key governance concept:
+
+- **Permission boundary**
+  - A JSON document that **looks like a policy**, but:
+    - It **does not grant permissions by itself**.
+    - It defines the **maximum allowed permissions** a user or role can ever have.
+  - Effective permissions = **intersection** of:
+    - What identity/role policies **allow**, and
+    - What the **permission boundary** allows.
+
+Example from the video:
+
+- User **Arnold** has an identity policy that allows `iam:CreateUser`.
+- Arnold’s **permission boundary** only allows S3, CloudWatch, and EC2 operations.
+- Result: Arnold **cannot** actually create IAM users, because `iam:CreateUser` is outside the boundary.
+- So even explicit allows in a policy are useless if they exceed the boundary.
+
+This lets organizations centrally enforce “you can never go beyond this line,” regardless of how individual policies are written.
+
+---
+
+## 4. Governance and managed policy changes
+
+The video closes with real-world governance points:
+
+- **AWS-managed policies** can **change over time**:
+  - Example: `CloudWatchFullAccess` might gain new permissions in a future update.
+- Customers must:
+  - Periodically review such changes.
+  - Assess them against **organizational rules and compliance requirements**.
+  - Adjust their own controls (permission boundaries, SCPs, custom policies) if needed.
+
+This all feeds back into the **Shared Responsibility Model**:
+
+- AWS secures and evolves the **infrastructure and platform**.
+- Customers must:
+  - Centrally manage **identities, groups, roles, and policies**.
+  - Ensure **authentication, authorization, and compliance** match their risk posture.
+  - Use constructs like **least privilege, policy reviews, and permission boundaries** to keep access safe and auditable at scale.
+
+---
+
+# Auto-Scaling Principles
+
+---
+
+Auto Scaling makes your application’s compute capacity **elastic instead of fixed**, so it can react automatically to changing load and certain failures, instead of relying on manual instance management.
+
+---
+
+## 1. Problem: load balancing alone isn’t enough
+
+- You start with:
+  - A **load balancer** → routes traffic to
+  - A **target group** → has some **EC2 instances**.
+- This spreads requests, but:
+  - If traffic **spikes**, a fixed number of instances can be overwhelmed.
+  - If traffic **drops**, those same instances can sit mostly idle and **waste money**.
+
+You need something that can **change the number of instances** as demand changes.
+
+---
+
+## 2. Auto Scaling Group (ASG): dynamic instance management
+
+An **Auto Scaling Group** manages how many EC2 instances you have.
+
+- Uses **metrics + rules** to decide when to add/remove instances.
+- Example with CPU:
+  - If **CPU > 80%** → **scale out** (e.g., add 1 or 2 instances).
+  - If **CPU < 30%** → **scale in** (terminate some instances).
+- You configure:
+  - Which **metric** (CPU, requests, custom metric, etc.).
+  - **Thresholds** (e.g., 80% / 30%).
+  - **Step size** (how many instances to add/remove per event).
+
+These thresholds and steps are **application-specific**—they must match your workload and traffic patterns.
+
+---
+
+## 3. ASG limits, minimum size, and self-healing
+
+Key concepts:
+
+- **Upper and lower limits**
+  - Maximum and minimum instance count the ASG is allowed to have overall.
+- **Minimum size**
+  - Guarantees at least **N instances are always running**.
+  - Example: min size = 1 means the ASG ensures **at least one** instance is always contributing to the target group.
+
+**Self-healing:**
+
+- If an **ASG-managed instance** fails or is terminated:
+  - The ASG **replaces** it automatically.
+- Important limitation:
+  - Instances **you created manually** and simply registered in the target group are **not** managed or recovered by the ASG, even if their loss affects overall utilization.
+
+---
+
+## 4. CloudWatch + ASG: who does what?
+
+- **Amazon CloudWatch**:
+  - Monitors metrics.
+  - Evaluates your thresholds.
+  - Raises **alarms** when conditions are met (e.g., CPU > 80% for N minutes).
+- **Auto Scaling Group**:
+  - Listens to those alarms.
+  - Performs the **scaling actions** (launch/terminate instances).
+
+So:
+- CloudWatch = **eyes and alarm bell**.
+- ASG = **hands that add/remove capacity**.
+
+---
+
+## 5. Making new capacity actually useful: launch configuration
+
+For scaling to work, **new instances must include your application** and be ready to serve traffic.
+
+Two main provisioning approaches:
+
+1. **Custom AMI**
+   - Bake OS + application into an Amazon Machine Image.
+   - New instances launch already having the app installed.
+
+2. **Bootstrap / user-data script**
+   - Start from a more generic AMI.
+   - Use user data to install/configure the app at boot.
+
+These details are captured in a **launch configuration / launch template**, which defines how ASG-created instances are built (AMI, instance type, security groups, user data, etc.).
+
+---
+
+## 6. Little's Law
+
+ Little’s Law helps calculate how many instances of compute (EC2 instances) that you need.
+
+- L = λW
+- L = number of instances (or mean concurrency in the system)
+- λ = mean rate at which requests arrive (req/sec)
+- W = mean time that each request spends in the system (sec)
+  
+For example, at 100 requests per second (rps), if each request takes 0.5 seconds to process, you will need 50 instances to keep up with demand.
+
+---
+## 7. Predictive Scaling
+Predictive scaling is a feature of AWS Auto Scaling that uses machine learning to analyze historical traffic and usage patterns to forecast future demand for EC2 instances and other AWS resources. Using these forecasts, predictive scaling automatically schedules scaling actions in advance to ensure sufficient capacity will be available to meet the predicted spikes in traffic or usage.
+
+Some critical aspects of predictive scaling include:
+
+- **Load forecasting** - Auto Scaling analyzes a predefined number of days of historical load metric data like CPU utilization and generates forecasts for the next few days on an hourly basis.
+- **Scheduled scaling actions** - Based on the load forecasts, Auto Scaling schedules actions to proactively increase or decrease resource capacity, like the number of EC2 instances in an Auto Scaling group. This helps maintain target resource utilization levels set in the scaling policies.
+- **Dynamic scaling fallback** - If actual demand exceeds forecasts, dynamic scaling policies can still trigger additional capacity as needed.
+By preemptively scaling resources to match predicted loads, predictive scaling enables Auto Scaling to be faster more accurate, and helps keep applications responsive.
+
+According to AWS - Predictive scaling is well suited for the following situations:
+
+- Cyclical traffic, such as high use of resources during regular business hours and low use of resources during evenings and weekends
+- Recurring on-and-off workload patterns, such as batch processing, testing, or periodic data analysis
+- Applications that take a long time to initialize, causing a noticeable latency impact on application performance during scale-out events
+  
+---
+
+# Launch Templates
+
+---
+
+Launch templates and launch configurations both define **how EC2 instances are built** for Auto Scaling Groups, but the video makes it clear that **launch templates are the modern, recommended option** and launch configurations are mostly for legacy/backward compatibility.
+
+---
+
+## 1. Why launch templates are preferred
+
+- When you try to create a **launch configuration**, AWS explicitly recommends using **launch templates** instead.
+- Message: new work should use **launch templates**, because:
+  - They’re where AWS is investing.
+  - They support more features and better governance.
+
+---
+
+## 2. What a launch template is and why it matters
+
+A **launch template** is a **reusable blueprint** for launching EC2 instances. It:
+
+- Automates instance launch settings.
+- Can simplify **permission management** through IAM-related options.
+- Most importantly, lets you **enforce organizational best practices**.
+
+Governance example:
+
+- Standardize on a specific **AMI**:
+  - Multiple microservice teams all use the same base OS image.
+  - That AMI can already include:
+    - Required agents (monitoring, security),
+    - Common tooling,
+    - Hardening settings.
+- This keeps environments consistent and reduces drift.
+
+---
+
+## 3. Building a launch template (walkthrough highlights)
+
+The video walks through creating a template end-to-end:
+
+- **Name & description**
+  - You can create **versions** later for controlled changes.
+- **Auto Scaling guidance**
+  - Ensures required fields (like **AMI**) are filled correctly for unattended scaling.
+- **AMI selection**
+  - Example: choose an **Ubuntu** AMI.
+- **Instance type**
+  - Example: `t2.micro`.
+  - Note: Auto Scaling can use **multiple instance types** for cost and availability balancing.
+- **Key pair**
+  - Select a key pair for SSH access (if needed).
+- **Networking**
+  - Choose **VPC**, subnets, and **security groups** (e.g., allow HTTP and SSH).
+- **Storage**
+  - Override the AMI’s default root volume (e.g., from **8 GB to 10 GB**).
+- **Tags**
+  - Treated as **enterprise-critical**:
+    - E.g., `Owner`, `Environment`, `CostCenter`.
+    - Warning: untagged resources might be candidates for **termination** in some orgs.
+
+---
+
+## 4. Networking details: when custom ENIs help vs. hurt
+
+- **Predefined network interfaces (ENIs)**:
+  - Generally **not compatible** with Auto Scaling multiple instances, because:
+    - One fixed ENI/IP can’t be shared across many scaled instances.
+  - But useful for **single-instance maintenance** scenarios:
+    - You want to preserve an IP address so **dependent services don’t break**.
+    - E.g., manual maintenance on a server that external systems point to.
+
+---
+
+## 5. Advanced options with an Auto Scaling mindset
+
+Launch templates also expose advanced settings, such as:
+
+- **Spot pricing** (request Spot capacity for cost savings).
+- **Monitoring** (enable detailed CloudWatch metrics).
+- **Tenancy** (shared vs. dedicated hardware).
+- **Licensing** options to stay compliant with software license terms.
+
+All of these can be standardized in the template, so every instance launched via Auto Scaling or manually follows the same rules.
+
+---
+
+## 6. Immutability, versioning, and scope
+
+- **Immutability & versioning**
+  - Once created, a specific template **version** is immutable.
+  - To change behavior (new AMI, instance type, etc.), you create a **new version**.
+  - This:
+    - Prevents silent configuration drift.
+    - Enables controlled rollouts and easy rollbacks.
+- **Usage**
+  - The same template can be used by:
+    - **Auto Scaling Groups**.
+    - **Manual EC2 launches** (on-demand).
+- **Regional scope**
+  - Launch templates are **regional resources**:
+    - You manage them region by region (like EC2 and ASGs themselves).
+
+---
+
+Overall, the video’s message is:
+
+- **Use launch templates** as your standard way to define how instances are launched.
+- Leverage them to:
+  - Enforce **best practices** (AMI, tags, security settings),
+  - Support **Auto Scaling** and manual launches consistently,
+  - Manage change safely with **versioning** and avoid configuration drift.
+
+---
+
+# Auto Scaling Group
+
+---
+
+The “Auto Scaling Group Part 1” video shows how ASGs are the **engine of elasticity** in AWS and walks through how their configuration affects cost, capacity, and traffic flow.
+
+---
+
+## 1. ASGs as the mechanism for elasticity
+
+- Auto Scaling Groups (ASGs) automatically **add or remove EC2 instances** so capacity tracks demand.
+- The setup is **guided and step-based**:
+  - You start by choosing a **launch template** (and even a specific template version).
+  - This ensures every new instance is created from a **consistent, repeatable blueprint**.
+- One launch template can be reused by **multiple ASGs**:
+  - A one‑to‑many relationship that supports **standardization** across applications or environments.
+
+---
+
+## 2. Instance types, cost strategy, and capacity mix
+
+- You can:
+  - Stick with the **instance type** defined in the launch template (e.g., `t2.micro`), or
+  - **Override** it in the ASG to:
+    - Mix multiple instance types,
+    - Combine **On-Demand** and **Spot** capacity.
+
+The detailed cost/capacity logic:
+
+- **On-Demand base capacity**
+  - Define a base number of instances that will always be **On-Demand**.
+- **Above the base**
+  - Split additional capacity between:
+    - On-Demand, and
+    - Spot instances.
+- **On-Demand instance selection**
+  - ASG tries instance types in the **priority order you set**.
+  - This matters if you want to maximize use of **Reserved Instances**:
+    - RI discounts are tied to specific instance types.
+- **Savings Plans vs RIs**
+  - **Savings Plans** are more flexible:
+    - Apply to **compute usage** across instance families, not just one exact shape.
+  - RIs are more rigid but can be cheaper for fixed shapes.
+
+- **Spot allocation strategies**
+  - **Capacity Optimized**:
+    - Chooses Spot pools with more available capacity.
+    - Better for **longer retention** and fewer interruptions.
+  - **Lowest Price**:
+    - Chooses cheapest pools.
+    - Maximizes savings but with **higher interruption risk**.
+  - Choice depends on workload tolerance for interruption vs cost.
+
+---
+
+## 3. Networking and placement
+
+- You choose **subnets across multiple Availability Zones**:
+  - ASG then launches instances across AZs for **resilience**.
+- Important note:
+  - AWS does **not** auto-modify your existing subnets as regions evolve.
+  - You must design and maintain your subnet layout yourself.
+
+---
+
+## 4. How instances receive traffic (or work)
+
+- **Load balancing is optional**:
+  - Example: a **message-queue consumer** fleet:
+    - ASG scales consumers based on queue depth.
+    - No load balancer needed; they pull work from the queue.
+- When you **do** use a load balancer:
+  - You must attach the **correct target group** to the ASG:
+    - Otherwise, the ASG may launch instances that **never receive traffic**.
+
+---
+
+## 5. Health checks and monitoring
+
+- **Health checks**
+  - **EC2 health checks**:
+    - Look at instance-level health (e.g., instance status checks).
+  - **ELB health checks**:
+    - Use load balancer health (e.g., HTTP `/health` endpoint).
+    - More app-aware if you’re behind a load balancer.
+- **Health check grace period**
+  - Time window after an instance launches during which health checks are **ignored**.
+  - Prevents new instances from being marked unhealthy while still booting / starting services.
+
+- **Monitoring**
+  - Standard monitoring is available by default.
+  - **Advanced monitoring** options exist but are left disabled in the walkthrough for simplicity.
+
+---
+
+The “Auto Scaling Group Part 2” video explains how **ASG sizing and policies turn elasticity into a controlled, business-aware system** instead of blind automation.
+
+---
+
+## 6. Core sizing parameters: min, desired, max
+
+Auto Scaling Groups use three key numbers:
+
+- **Minimum capacity**
+  - The **safety baseline**: the fewest instances you will ever run.
+  - Protects reliability during failures (e.g., Spot interruptions) by ensuring you don’t drop below a certain footprint.
+
+- **Desired capacity**
+  - The **target steady state** the ASG tries to maintain.
+  - The gap between **desired** and **minimum** is an intentional **buffer**:
+    - Small traffic variations are absorbed by this buffer instead of triggering instant scale‑out.
+    - This helps avoid user-visible delays while new instances launch and warm up.
+
+- **Maximum capacity**
+  - An **artificial upper limit**:
+    - Prevents runaway scaling and uncontrolled cost during unexpected surges.
+  - Relevant for:
+    - **DDoS-like spikes**, where it’s hard to separate bad from good traffic.
+    - **Legit bursts** (holidays, flash sales), where you still need a cost ceiling.
+
+---
+
+## 7. Setting a defensible maximum capacity
+
+Instead of guessing max capacity, the video suggests a **data-driven method**:
+
+1. Temporarily **enable scale-in protection** for all instances.
+   - ASG can scale **out**, but **not in**.
+2. Observe behavior over a realistic window (e.g., overnight).
+   - Example: you discover the fleet peaked at **250 instances at 3 a.m.**.
+3. Turn that observation into a policy:
+   - Set `max = observed peak + contingency`, e.g., **275**.
+   - You now have **documented evidence** to justify this limit to finance / cost-control teams.
+
+This converts “guessing a number” into a **measurable, auditable decision**.
+
+---
+
+## 8. Scale-in protection: reliability and operations
+
+**Scale-in protection** prevents specific instances from being chosen for termination during scale-in. Uses:
+
+- **Operational safety**
+  - Don’t kill the instance an engineer is SSH’d into for debugging.
+- **Stateful systems**
+  - For systems like **NoSQL clusters**, random scale-in can mean:
+    - Data loss,
+    - Heavy redistribution,
+    - Or major performance impact.
+  - Scale-in protection lets you control *which* nodes can be removed, and when.
+
+---
+
+## 9. Scaling policies and the “no scaling” option
+
+The video links behavior to **scaling policy configuration**:
+
+- Example: **Target tracking**
+  - Keep average CPU around, say, **80%**, with a **warm-up time** so new instances aren’t over-counted too early.
+- Emphasizes that *elasticity doesn’t always require dynamic scaling*:
+  - For predictable workloads (e.g., many IoT scenarios with stable patterns), you can choose:
+    - **Scaling policy = None**
+    - ASG then maintains a **fixed fleet**, only **replacing failed instances**.
+  - You still gain **self-healing** without capacity changes.
+
+---
+
+## 10. Notifications, tagging, and final creation
+
+- **SNS notifications**
+  - ASG can send messages for:
+    - Scale-out and scale-in events.
+    - **Failed scaling attempts** (e.g., hit max capacity but still need more).
+  - Useful for:
+    - Audit trails,
+    - On-call alerts,
+    - Early warning when limits are constraining demand.
+
+- **Tagging, review, and creation**
+  - Tags help track ownership, environment, and costs.
+  - Final review before creation ensures:
+    - Sizing parameters (min/desired/max),
+    - Policies,
+    - Notifications
+    are correct.
+  - When the ASG is created, it launches instances as needed to reach **desired capacity**.
+
+---
+## 11. Validating ASG behavior and activity history  
+- After creation, you confirm Auto Scaling is working by:
+  - Refreshing the console and verifying **current instance count** matches **desired capacity**, staying within min/max.
+- **Activity history**:
+  - Shows when instances were **added or removed**.
+  - Acts as an **audit trail** to explain *what the group did and when*.
+
+---
+
+## 12. Multiple scaling policies and metric choices  
+- An ASG can have **multiple scaling policies** at once:
+  - Not just CPU, but also:
+    - **Network metrics** (e.g., `NetworkIn`),
+    - **Load balancer request counts**, etc.
+- This lets the group react to **different kinds of pressure** (compute vs. traffic vs. network).
+
+---
+
+## 13. Policy types: simple, step, and anomaly-based  
+- **Simple scaling**
+  - One CloudWatch alarm → one scaling action.
+  - Example: “If alarm fires, add **2 instances**” or “add **10%** capacity.”
+
+- **Step scaling**
+  - Multiple actions for different metric ranges:
+    - Small breach → **small** scale-out.
+    - Bigger breach / persistent issue → **larger** scale-out.
+  - More nuanced response than simple scaling.
+
+- **CloudWatch alarm setup example**
+  - Metric: ASG `NetworkIn`.
+  - Evaluation period: **5 minutes** to avoid reacting to brief spikes.
+  - Configure:
+    - Comparison operator (e.g., `GreaterThanThreshold`).
+    - Threshold value.
+    - Handling of **missing data** (treat as good/bad/ignore).
+
+- **Anomaly detection**
+  - Alternative to fixed thresholds.
+  - CloudWatch learns a **baseline pattern** and flags **abnormal** behavior.
+  - Useful when “normal” varies over time and a single static threshold is hard to pick.
+
+---
+
+## 14. Notifications and scheduled actions  
+- **SNS notifications**
+  - Two complementary signals:
+    - **CloudWatch alarms** → “Something is wrong / unusual.”
+    - **ASG notifications** → “Here’s what scaling actually did about it.”
+  - Helps operations:
+    - Correlate incidents with scaling actions.
+    - Spot cases where scaling **couldn’t** happen (e.g., hit max).
+
+- **Scheduled actions**
+  - Scale **proactively** for predictable patterns.
+  - Examples:
+    - Scale up before a factory shift starts.
+    - Scale down at night.
+  - Use recurrence / cron-like schedules—similar to setting recurring calendar events.
+
+---
+
+## 15. Immutable infrastructure and safe rollouts  
+- **Updating a launch template version**:
+  - Does **not** change existing instances automatically.
+  - New version is used **for future launches**.
+
+- **Instance refresh**
+  - Controlled rollout mechanism:
+    - Gradually **replaces existing instances** with ones from the new template version.
+    - Honors a **minimum healthy percentage** to maintain availability (e.g., keep ≥ 90% healthy).
+
+- **Target group health vs. instance status**
+  - An instance being “running” is **not the same** as being ready to serve traffic.
+  - Target group health states:
+    - **Unhealthy** – failing health checks; not receiving traffic.
+    - **Healthy** – passing checks; serving traffic.
+    - **Draining** – finishing existing requests; no new traffic.
+  - Load balancers use these states to:
+    - Route traffic only to **healthy** targets during rolling upgrades.
+    - Protect users from partially initialized or failing instances.
+
+---
+
+## 16. ASGs as refresh and replacement engines  
+- The video shows that when an instance is terminated, the Auto Scaling group **refreshes** capacity by launching a replacement.  
+- ASGs are positioned as the practical way to **rebuild compute automatically**, keeping the environment in its intended state without manual instance recreation.
+
+---
+
+## 17. Demonstrating self‑healing with a forced failure  
+- To make self‑healing visible, the demo **manually terminates** an instance that is managed by the ASG.  
+- Strong warning: **never do this in production** just to “test” – it’s for learning / non‑prod.  
+- Goal: show that when an instance or app fails, the ASG should react to **restore service automatically**.
+
+---
+
+## 18. Activity history and console integration  
+- The **Activity history** tab records:
+  - Instance terminations,
+  - New launches,
+  - Reasons for each action.  
+- This gives an **audit trail** explaining what the ASG is doing and why.  
+- The console view is becoming more integrated:
+  - From the ASG page you can jump to related areas like **load balancers**.
+  - Even if the UI changes over time, the **elasticity concept remains the same**.
+
+---
+
+## 19. Health checks and capacity reconciliation  
+- Core mechanism:
+  - **EC2 health checks** detect an instance as **terminated / stopped / unhealthy**.  
+  - The ASG compares **actual instance count** to **desired capacity**.
+  - When capacity is below desired, it **launches a new instance**.  
+- Verification steps in the demo:
+  - In the EC2 list, a **new instance** appears with a **new IP address**.
+  - In the **target group**, you see:
+    - Updated **target IDs**,
+    - Health states confirming the new instance is now healthy and serving traffic.
+
+---
+
+## 20. Cleanup behavior  
+- Deleting the **Auto Scaling group**:
+  - Terminates all **instances managed by that ASG**.
+  - Does **not** delete:
+    - The target group,
+    - The load balancer.  
+- Termination is **asynchronous**:
+  - It can take a short time for all instances to be shut down and the group to fully disappear.
+
+--- 
