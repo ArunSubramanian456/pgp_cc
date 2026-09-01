@@ -1882,3 +1882,320 @@ The video links behavior to **scaling policy configuration**:
   - It can take a short time for all instances to be shut down and the group to fully disappear.
 
 --- 
+
+# Storage on AWS
+
+--- 
+
+Storage on AWS is framed as a fundamental building block for any real application, and the video compares four main options—Instance Store, EBS, EFS, and S3—through how they affect durability, scalability, and architecture.
+
+## 1. Instance Store (ephemeral local storage)  
+   - Local disks physically attached to an EC2 instance.  
+   - **Ephemeral**: data is lost when the instance stops, is terminated, or fails.  
+   - Example risk: storing user profile pictures on instance storage in an Auto Scaling group—when instances scale in, those files disappear.  
+   - Conclusion: fine for temporary data (caches, scratch space), **not** for durable user data.
+
+## 2. Elastic Block Store (EBS) – persistent block volumes  
+   - Attachable **block storage** for EC2, like virtual hard drives.  
+   - Can start, say, at 100 GB and **extend or add volumes later** as data grows.  
+   - Constraints:
+     - A volume can be **attached to only one EC2 instance at a time** (for most common volume types).
+     - Volume and instance must be in the **same Availability Zone**.  
+   - Good for OS disks, databases, and single-instance apps needing durable storage.
+
+## 3. Elastic File System (EFS) – shared file system  
+   - **Shared file storage** that multiple EC2 instances can mount **read/write** at the same time.  
+   - No need to predefine size; it **auto-scales** from bytes to terabytes, and you pay for what you use.  
+   - Behaves like a network file system, but:
+     - **Does not manage concurrency** for you—your application must handle locking/contention.  
+   - Good for shared content, web servers behind a load balancer, or shared config/assets.
+
+## 4. Amazon S3 – object storage  
+   - Stores data as **objects** (files) in buckets—more like Dropbox/Google Drive than a disk.  
+   - You upload/download whole objects (or use multipart APIs), not block-level writes.  
+   - Very flexible access:
+     - Use from **EC2, Lambda, on-prem apps** via APIs/SDKs.
+     - Integrates with **CloudFront** for global content delivery.
+     - Triggers **events** for automation (e.g., process a file as soon as it’s uploaded), reducing the need for cron polling.
+   - Can be scripted via AWS CLI for operational tasks.  
+   - Fine-grained **permissions** enable controlled sharing and uploads.  
+   - Acts as a central “glue” in data pipelines:
+     - Example: Kinesis → process/transform → store in S3 → load into Redshift.  
+   - For higher resilience, you can configure **cross-region replication**, but you must set it up explicitly.
+
+## Overall:  
+- **Instance Store** – fast, ephemeral, for temporary data.  
+- **EBS** – durable block storage for one instance (per AZ).  
+- **EFS** – shared, auto-scaling file system for many instances.  
+- **S3** – highly durable, integrated object storage, central to many application and data architectures.
+
+---
+
+# Introduction to EBS
+
+---
+
+Elastic Block Store (EBS) is introduced as the **primary block storage for EC2**, designed to hold both applications and their long-lived data in enterprise environments.
+
+Key points:
+
+- **Why EBS matters**
+  - Enterprise systems are built on **applications + the data they depend on**.
+  - Different storage types serve different needs; **EBS is the “disk” behind EC2** that works for:
+    - OS + application installation.
+    - Durable, long-term data (databases, analytics, HPC).
+
+- **Volumes, root disks, and layout**
+  - An **EBS volume** is like a **disk**; it must be **attached to an instance** (e.g., EC2) to be useful.
+  - The first attached disk is the **root volume**:
+    - Holds the **operating system**.
+    - Cannot be **detached** while in use, but can be **replaced** (e.g., move from HDD to SSD).
+  - You can attach **multiple volumes** to one instance:
+    - Dev/test: often put OS + app + data on one root volume for convenience.
+    - Production: usually **separate app and data** onto different volumes for performance, manageability, and safety.
+
+- **Workloads and retention**
+  - Typical EBS-backed workloads:
+    - **Databases**, **analytics**, **HPC** – all need fast, consistent, persistent storage.
+  - Example: e‑commerce
+    - A customer returning after a year should have their data loaded **as quickly** as a frequent user.
+  - Dev environments also rely on EBS to **mirror production-like storage characteristics**.
+
+- **What “block storage” means**
+  - When you **format** a disk, it’s divided into fixed-size **blocks**.
+  - Data is stored and accessed in **blocks**, which:
+    - Can lead to partially filled blocks (unused space),
+    - Are read/written as whole units.
+  - Concepts like **fragmentation** and **defragmentation** matter for how data is laid out and accessed.
+  - AWS hides the underlying physical disks and exposes a huge, logically separated **block-storage system** to instances as EBS volumes.
+
+- **Core operational concepts**
+  - **Formatting & file systems**: preparing a volume (ext4, NTFS, etc.) so OS and apps can use it.
+  - **Attaching / detaching**: linking a volume to/from an EC2 instance.
+  - **Mounting**: making a formatted volume part of the OS directory tree (root is auto-mounted).
+  - **IO / IOPS**: IO operations and IO operations per second—key performance metrics for EBS.
+  - **Freezing / thawing IO**: pausing writes to take a **consistent snapshot**, then resuming.
+  - **Crash consistency vs application consistency**:
+    - Crash-consistent: like capturing disk state at power loss; in-flight operations may be mid-write.
+    - Application-consistent: app (e.g., DB) is quiesced/flushed first, making restores safer and cleaner.
+
+Overall, the video positions EBS as **foundational, durable block storage** behind EC2, and gives just enough block-storage and ops vocabulary so you can reason about layout, performance, and recovery in real workloads.
+
+--- 
+
+# EBS Feature Analysis
+
+---
+
+The EBS Feature Analysis video walks through **what EBS is good at, how volume types differ, and how snapshots protect and move data**, all tied to reliability, performance, and cost trade-offs.
+
+---
+
+## 1. Core EBS characteristics and reliability constraints
+
+- **Block storage for EC2**
+  - EBS exposes **raw block devices** to EC2:
+    - You get fine-grained control over data layout and access patterns.
+    - You choose the file system and formatting (ext4, XFS, NTFS, etc.).
+  - Well-suited for **primary, real-time storage** such as:
+    - Databases
+    - Analytics engines
+    - Other mission-critical workloads needing low-latency access.
+
+- **Same-AZ requirement**
+  - An EC2 instance and its EBS volume **must be in the same Availability Zone**.
+  - Cross-AZ dependencies are avoided because:
+    - If the volume’s AZ has issues, an instance in another AZ relying on that volume would effectively fail too.
+  - Keeping them co-located reduces risk of **cascading failures**.
+
+---
+
+## 2. Lifecycle independence and safety
+
+- **Volumes can outlive instances**
+  - By default or configuration, an EBS volume can **persist after the EC2 instance stops or is terminated**.
+  - Whether a volume is deleted on instance termination depends on a **specific setting**.
+- Why this matters:
+  - Protects against **operational mistakes**:
+    - Example: a faulty script terminates your DB instance.
+    - Even if the app’s state isn’t perfectly consistent, the EBS disk is still there, giving you a recovery path.
+  - Decouples **compute lifecycle** from **data lifecycle**.
+
+---
+
+## 3. Choosing the right EBS volume type (“2P approach”)
+
+EBS offers multiple volume types; picking the right one is about **Performance + Price**:
+
+- Common metrics:
+  - **IOPS** – read/write operations per second.
+  - **Throughput** – amount of data per second (MB/s or Mbps).
+  - **Allocated capacity (GB/TB)** – also influences cost and performance ceilings.
+
+**Volume families and typical uses:**
+
+1. **General Purpose SSD (gp2/gp3)**
+   - Balanced price/performance.
+   - Typical use:
+     - Boot volumes.
+     - Mid-size databases.
+     - Dev/test environments.
+   - Good default for many workloads.
+
+2. **Provisioned IOPS SSD (io1/io2)**
+   - You explicitly provision **high, consistent IOPS**.
+   - Designed for:
+     - IO-intensive, latency-sensitive workloads (e.g., large production databases).
+   - Higher cost, but predictable performance.
+
+3. **Throughput-optimized HDD (st1)**
+   - HDD volumes tuned for **high, sequential throughput**.
+   - Best for:
+     - Big, streaming workloads like log processing, ETL, big data scans.
+
+4. **Cold HDD (sc1) / Magnetic**
+   - Lowest cost, lower performance.
+   - Good for:
+     - Infrequently accessed data.
+   - “Magnetic” may still appear in the console UI even if it’s less prominent in newer docs.
+
+**2P approach:**
+- Pick volume type based on:
+  - **Performance** you truly need (IOPS + throughput).
+  - **Price** you’re willing to pay.
+- Avoid over-provisioning high-end SSD for workloads that are mostly cold or sequential.
+
+---
+
+## 4. Snapshots: protection and data mobility
+
+- **Snapshots** are **point-in-time copies** of an EBS volume:
+  - Stored in S3-backed snapshot storage (managed by AWS).
+  - Useful for:
+    - Backup / restore.
+    - Cloning environments.
+    - Moving data **within or across regions** (as long as compliance allows).
+
+- **Incremental behavior**
+  - First snapshot: **full copy** (e.g., 10 GB).
+  - Subsequent snapshots: **only changed blocks** (e.g., next 4 GB, then 2 GB).
+  - Total stored data is the union of referenced blocks.
+- Cost implications:
+  - Deleting a snapshot **does not necessarily free all its size**:
+    - If later snapshots still reference blocks first captured in that snapshot, those blocks stay.
+    - Data is removed only when **no remaining snapshot references those blocks**.
+  - Hence, snapshot billing is about the **unique data blocks** still referenced across the entire snapshot chain.
+
+---
+
+Overall, the video frames EBS as **primary, durable, block-level storage** for EC2 where you carefully pick volume type by performance/price, rely on volume–instance co-location for reliability, use persistence settings to protect against accidental data loss, and use snapshots as a safety net and migration tool—while understanding their incremental, reference-based cost model.
+
+---
+
+# EBS - LifeCycle, Encryption and Best Practices
+
+---
+
+The “EBS Lifecycle, Encryption and Best Practices” video explains how to run EBS in a **production- and compliance-ready way**, focusing on backups, lifecycle policies, encryption, and operational hygiene.
+
+---
+
+### 1. Snapshots and why manual backup doesn’t scale
+
+- **Snapshots** are the practical way to create **point‑in‑time, recoverable copies** of EBS volumes.
+- In large environments:
+  - Many apps → many databases → many volumes.
+  - **Manual snapshotting** is:
+    - Inconsistent,
+    - Labor‑intensive,
+    - Error‑prone.
+- Conclusion: you need **automation** to:
+  - Reduce human error,
+  - Keep backups consistent,
+  - Prove you’re meeting internal and regulatory requirements.
+
+---
+
+### 2. Compliance lens (e.g., GDPR)
+
+Using GDPR as an example, the video links regulations to concrete backup expectations:
+
+- Organizations must:
+  - Protect **integrity and confidentiality** of data.
+  - **Regularly back up** data.
+  - Store backups **securely** to avoid loss and unauthorized access.
+  - Have **documented retention and disposal policies**:
+    - How long backups are kept,
+    - How and when they’re securely deleted.
+- Key idea: compliance is about **governance and repeatability**, not just “having backups somewhere.”
+
+---
+
+### 3. Lifecycle policies: automating backup & retention
+
+**Lifecycle policies** operationalize all this:
+
+- Define **backup frequency**:
+  - E.g., hourly, daily, weekly snapshots.
+- Define **retention rules**:
+  - By age (e.g., keep 30 days),
+  - Or by count (e.g., keep last 10 snapshots).
+- Control **archival** of older snapshots to cheaper tiers.
+- Enable **cross‑region copying**:
+  - Protect against Region‑level issues,
+  - Support DR strategies (subject to compliance constraints).
+- Allow **controlled sharing** with specific AWS accounts.
+
+Governance and safety:
+
+- Track **policy changes** (who changed what, when).
+- Restrict updates to **authorized operators only**.
+- **Monitor** policy execution so missed / failed backups are visible.
+
+---
+
+### 4. Encryption for EBS volumes and snapshots
+
+Encryption is explained specifically in the context of EBS and snapshots:
+
+- Supports **root and data volumes**.
+- Provides protection:
+  - **At rest** (on the physical media),
+  - **In transit** between instance and storage,
+  - **Within snapshots**.
+- Uses **KMS‑managed data keys**:
+  - KMS generates and manages keys used to encrypt volume data.
+
+Operational cautions:
+
+- When **sharing encrypted snapshots**:
+  - You must also share or grant access to the **KMS key**.
+  - You should question **whether sharing is truly necessary**, since it widens your security perimeter.
+- Mismanaging keys or sharing too broadly can undermine encryption guarantees.
+
+---
+
+### 5. EBS best practices (pulled together)
+
+The video finishes with a set of recommended practices:
+
+- **Requirements‑driven volume selection**:
+  - Match volume type (gp, io, st1, sc1, etc.) to performance and durability needs.
+- **Right‑sizing**:
+  - Avoid over‑provisioning capacity and performance (IOPS/throughput) beyond what workloads need.
+- **Encryption by default**:
+  - Encrypt volumes and snapshots, especially those containing sensitive or regulated data.
+- **Tagging**:
+  - Use tags for:
+    - Ownership and environment (prod/dev),
+    - Cost allocation,
+    - Backup/lifecycle targeting (e.g., which volumes a policy should apply to).
+- **Snapshot automation**:
+  - Use lifecycle policies or backup services to automate snapshot creation, retention, and deletion.
+- **Monitoring & dashboards**:
+  - Watch EBS metrics (IOPS, throughput, latency, burst credits).
+  - Track backup success/failure and lifecycle policy runs.
+
+Overall, the video positions EBS as **flexible, highly available, workload‑optimized block storage** whose real production strength comes from combining the right volume types with **encrypted, automated, policy‑driven snapshots and solid governance**.
+
+---
