@@ -2199,3 +2199,122 @@ The video finishes with a set of recommended practices:
 Overall, the video positions EBS as **flexible, highly available, workload‑optimized block storage** whose real production strength comes from combining the right volume types with **encrypted, automated, policy‑driven snapshots and solid governance**.
 
 ---
+
+# EFS Introduction
+
+---
+
+Elastic File System (EFS) is introduced as a **shared, elastic file system** that many EC2 instances can mount at the same time, letting multiple servers work on the same files and directories without duplicating data.
+
+Key points:
+
+- **Shared file system architecture**
+  - EFS is a **network file system** that multiple EC2 instances can mount concurrently.
+  - Ideal for workloads where many servers need the **same directory tree** (e.g., shared content, configs, user uploads).
+
+- **Mount targets & VPC integration**
+  - To use EFS in a VPC, you create **mount targets**—one per **Availability Zone** that needs access.
+  - Even if an AZ has many subnets (6–10), you only need **one mount target per AZ**.
+  - Each mount target:
+    - Lives in a subnet,
+    - Uses an IP from that subnet’s CIDR (manual or automatic assignment).
+  - Connectivity is standard VPC networking: route tables, subnets, security groups.
+
+- **NFS and security groups**
+  - EFS uses **NFS** on **port 2049**.
+  - EC2 instances need security group rules allowing **inbound 2049** from appropriate internal sources (e.g., the VPC CIDR like `172.31.0.0/16`).
+  - Security groups control **who can connect** to EFS.
+
+- **Elastic capacity and cost model**
+  - EFS **auto-scales** with the amount of data stored—no need to pre-size volumes.
+  - You pay for **actual data stored**, unlike pre-provisioned EBS capacity.
+
+- **Lifecycle management for cost optimization**
+  - Lifecycle rules can move data to **infrequent access (IA)** storage:
+    - Based on “days since last access” (e.g., 7 or 15 days).
+  - This reduces cost for older, colder files while keeping them accessible.
+
+- **Performance modes & throughput**
+  - **Performance modes (chosen at creation, cannot be changed later):**
+    - **General Purpose** – default for most workloads (web apps, CMS, shared home dirs).
+    - **Max I/O** – for highly concurrent, big‑data or analytics workloads.
+    - Changing modes later requires **migrating** to a new file system.
+  - **Throughput options:**
+    - **Bursting**:
+      - Baseline throughput scales with file system size.
+      - Uses a **credit model** to allow temporary bursts above baseline.
+    - **Provisioned throughput**:
+      - You explicitly set the throughput level,
+      - Pay more for guaranteed performance.
+
+- **Scope and access control**
+  - EFS is **region-scoped** (no native cross-region file system).
+  - Access control combines:
+    - **Security groups**: who can connect to the mount targets.
+    - **EFS file system policies (JSON)**: what actions/operations are allowed (e.g., read‑only vs read/write).
+  - Enables patterns like:
+    - A **read-only shared static content** file system mounted by many web servers.
+
+Overall, EFS is positioned as **shared, elastic file storage** for EC2 fleets: simple to mount across instances, automatically scalable in size, tunable for performance and cost via lifecycle rules and modes, and secured through both network controls and IAM-style policies.
+
+---
+
+# EFS - Hands On
+
+---
+
+Elastic File System (EFS) Hands‑on shows, step by step, how to **build and safely use a shared file system across EC2 instances in multiple AZs**, including networking, policies, mounting, and teardown.
+
+Key points:
+
+1. Environment and networking setup  
+   - Create a **dedicated security group** that:
+     - Allows **NFS (TCP 2049)**.
+     - Restricts access to the **VPC CIDR** only (e.g., `172.31.0.0/16` in the default VPC).  
+   - Attach this SG to **two EC2 instances in different AZs** so both can mount the same EFS file system in read/write mode.
+
+2. Creating the EFS file system  
+   - Use the **customized workflow** to highlight important choices:
+     - Name and **tags** for management and cost tracking.
+     - Disable automatic backups and lifecycle for the demo (not best practice for prod).
+     - Choose **General Purpose** performance mode.
+     - Select **Bursting** throughput mode.
+     - Optionally enable **encryption with KMS** keys.  
+   - EFS automatically creates **mount targets** (and underlying ENIs):
+     - You need a mount target in **each AZ** where instances may run.
+     - This is especially important for **Auto Scaling Groups** that might launch instances in any AZ.
+   - Assign the **restrictive security group** to the mount targets and add targets for any missing AZs.
+
+3. Access control with file system policies  
+   - EFS supports **file system policies (JSON)** on top of SGs:
+     - Preset examples: deny root, enforce read‑only, or require encrypted transport.  
+   - The demo configures a **custom JSON policy** that:
+     - Allows root access.
+     - Allows read/write.
+     - Allows unencrypted transport (for demo simplicity).  
+   - This shows how policy choices can **dramatically change security posture**.
+
+4. Mounting from EC2 instances  
+   - Use the **console-provided NFS mount command** (DNS-based endpoint).  
+   - Common issues & fixes:
+     - Ensure the **local mount directory exists** (`mkdir /efs` or similar).
+     - Install **NFS utilities** on Ubuntu (`nfs-common` package).  
+   - After mounting on both instances, they see the **same directory tree**.
+
+5. Validating shared storage and concurrency caveats  
+   - From instance A, create or append to a file on the mounted EFS path.  
+   - From instance B, read/append the **same file** and see changes, proving **cross-instance visibility**.  
+   - Limitation:
+     - EFS **does not handle application-level locking**.
+     - Apps must implement their own concurrency control to avoid write conflicts.
+
+6. Unmounting and clean teardown  
+   - **Unmount** the file system from each instance once testing is done.  
+   - **Delete** the EFS file system:
+     - This is **irreversible**—data is lost once deleted.
+     - Deletion also removes **mount targets and their ENIs**.  
+   - The demo reinforces:
+     - How to operate EFS safely (security groups + policies),
+     - And how to **cleanly deprovision** shared storage when it’s no longer needed.
+
+---
