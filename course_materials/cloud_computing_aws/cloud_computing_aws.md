@@ -2318,3 +2318,162 @@ Key points:
      - And how to **cleanly deprovision** shared storage when it’s no longer needed.
 
 ---
+
+# Object Storage - Simple Storage Service
+
+---
+
+- **What S3 Is**
+  - AWS’s **Simple Storage Service** based on **object storage** (not block storage).
+  - Stores virtually any file type (text, images, video, audio, documents) as **objects**.
+
+- **Buckets & Organization**
+  - Data lives in **buckets**, which are the top-level containers (no “root folder” concept).
+  - Buckets:
+    - Soft limit of ~**100 buckets per account** (increasable via AWS support).
+    - **Globally unique names** required, so common names are often taken.
+  - Inside buckets, you can create **folders and nested structures**; no explicit folder limit mentioned.
+
+- **Object Limits & Uploads**
+  - Object size: **0 bytes to 5 TB**.
+  - Large objects use **multipart upload** (up to ~5 GB per part), supported via console and APIs/SDKs.
+  - Successful uploads return **HTTP 200**, matching normal web semantics.
+
+- **Versioning**
+  - **Versioning** lets you keep historical versions of objects (e.g., evolving legal docs).
+  - Once enabled, it **cannot be fully disabled**, only **suspended**.
+
+- **Lifecycle Management**
+  - Automates movement of data:
+    - From standard S3 to cheaper storage classes (e.g., **Glacier**).
+    - Eventually to **deletion**.
+  - Rules can apply to both **current** and **previous versions** of objects.
+  - No code required—configured via lifecycle policies.
+
+- **Durability, Availability & Replication**
+  - Durability: **11 nines (99.999999999%)**.
+  - Availability: **99.99%** for standard S3; lower with reduced redundancy.
+  - Because regional outages can still happen, **cross-region replication** is used for resilience, but **applications must handle failover logic**.
+
+- **Global Delivery with CloudFront**
+  - S3 integrates with **CloudFront** for **caching** and **low-latency global delivery**.
+  - Supports “reverse sync” patterns where updates propagate from origins to edges.
+
+- **Developer-Focused Details**
+  - **Consistency model**:
+    - **Strong read-after-write** for new object PUTs.
+    - **Eventual consistency** for overwrites and deletes.
+  - Key addressing model: **bucket + key** (reflected in S3 event JSON).
+  - **Encryption at rest**:
+    - Via **KMS** or customer-managed encryption approaches.
+  - **Glacier**:
+    - Very low cost but **slow retrieval**, so used for archival.
+  - **Static website hosting**:
+    - S3 can directly host **static websites**, optionally fronted by CloudFront for CDN acceleration.
+
+---
+
+# S3 Overview and Buckets
+
+---
+
+Here’s a concise summary of the “S3 Overview and Buckets” content you described:
+
+- **Business Context**
+  - Example: a **financial audit firm** ingesting many customer documents (invoices, contracts, PDFs, spreadsheets).
+  - S3 is positioned as a good fit for **large-scale, multi-customer document exchange** with strong **governance** needs (retention, auditability).
+
+- **Bucket Design: Per-Customer vs Prefixes**
+  - Key design question:  
+    - **Many buckets** (one per customer) vs **few buckets** with **prefixes/folders** per customer.
+  - Two main constraints favor **prefix-based** organization:
+    - **Bucket name uniqueness**: globally unique across all AWS accounts and regions.
+    - **Bucket count limits**: default ~100; even after increases, still finite (~1000).
+  - Bucket naming rules further constrain choices:
+    - 3–63 characters, lowercase letters, numbers, dots, hyphens.
+    - Must start/end with letter or number.
+    - Cannot look like an IP address.
+  - Result: it’s hard to get “nice” names at scale, so **few buckets + prefixes** is more practical.
+
+- **Bucket Creation: Key Settings**
+  - **Block Public Access**
+    - Default safeguard to prevent accidental public exposure, even via misconfigured policies.
+  - **Versioning**
+    - For **document/object versions**, not source control.
+    - Cost implication: each version is a **full copy**.
+      - Example: 1 MB object changed by 1 byte → ~2 MB + 1 byte stored (two full versions).
+  - **Tags**
+    - Used for **ownership, cost allocation, and business context** (e.g., customer, project, environment).
+  - **Encryption at Rest**
+    - Choice of **who manages keys** (AWS-managed vs customer-managed KMS, etc.).
+  - **Object Lock (WORM)**
+    - Compliance feature preventing **deletion/overwrite** for a retention period.
+    - Preserves audit trails.
+    - **Must be enabled at bucket creation**; cannot be retrofitted later.
+
+- **Exploring the Console**
+  - After creating buckets (including another in a distant region to model future **replication**), the UI is reviewed:
+    - **Properties** (versioning, encryption, Object Lock, etc.).
+    - **Permissions & bucket policies**.
+    - **Metrics & monitoring**.
+    - **Lifecycle rules** (for transitions and expirations).
+    - **Replication** configuration.
+    - **Event notifications** (e.g., trigger Lambdas on uploads).
+    - **Access points** for fine-grained, scalable access control.
+  - Overall aim: link each S3 bucket option to **architecture, security, compliance, cost management, and multi-tenant (multi-customer) design**.
+
+---
+
+# S3 Folders, Upload file, Storage Class, Performance
+
+---
+
+Here’s a concise summary of the “S3 Folders, Upload File, Storage Class, Performance” video you described:
+
+- **Folders & Organization**
+  - Uses a bucket (e.g., `faf-dollars`) with **customer-specific folders** (e.g., `Starfleet`) instead of separate buckets per customer.
+  - Shows basic console actions:
+    - Creating folders for clean logical separation.
+    - Navigating with **breadcrumbs** between bucket, folder, and object levels.
+
+- **Uploading Objects**
+  - Demonstrates two equivalent upload methods:
+    - **Drag-and-drop**.
+    - **Upload** button.
+  - Uses an `invoice.xlsx` file as example.
+  - Emphasizes that upload time is a **configuration checkpoint**, not just “put the file in S3.”
+
+- **Destination Details & Protection Features**
+  - Upload form shows **Destination details**, inheriting bucket defaults:
+    - Versioning
+    - Encryption
+    - Object Lock
+  - With these disabled, console warns/recommends:
+    - **Enable versioning** to protect from:
+      - Accidental overwrites.
+      - Mistaken deletes.
+      - Misbehaving scripts wiping data.
+
+- **Storage Class & Cost/Access Tradeoffs**
+  - Storage class is framed as a **business decision**:
+    - Example: audit firm wants old documents available but not “hot.”
+  - **Standard**:
+    - Immediate access.
+    - Stored across **≥3 Availability Zones**.
+  - **Infrequent Access** classes:
+    - Cheaper but with **minimum storage duration** (e.g., 30 days) and retrieval considerations.
+  - **Reduced Redundancy** and **Intelligent-Tiering**:
+    - Additional cost-control levers.
+    - Support gradual movement toward archival tiers like **Glacier Deep Archive**.
+
+- **Security & Visibility**
+  - **Block Public Access** and **ACLs** stressed as default safeguards.
+  - Console shows **upload success/failure summaries** for operational feedback.
+
+- **Performance & Prefixes**
+  - Connects folder/prefix design to **throughput**:
+    - Request rates are **per prefix** (e.g., ~5,500 GETs/sec per prefix).
+    - Distributing objects across multiple prefixes/folders allows **parallel scaling** (e.g., 10 prefixes → ~55,000 GETs/sec).
+  - Hence, folder structure is not just cosmetic—it’s a **performance scaling tool**.
+
+---
