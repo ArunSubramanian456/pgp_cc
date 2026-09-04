@@ -2477,3 +2477,146 @@ Here’s a concise summary of the “S3 Folders, Upload File, Storage Class, Per
   - Hence, folder structure is not just cosmetic—it’s a **performance scaling tool**.
 
 ---
+
+# S3 Bucket Properties
+
+---
+
+This video explores the **S3 bucket Properties** settings and how they affect security, governance, automation, performance, cost, and delivery:
+
+- **Versioning & Delete Protection**
+  - **Bucket versioning**: can be enabled and later **suspended**, but not fully disabled once on—so it’s a long-term design choice.
+  - **MFA delete**: adds a second factor (via CLI/SDK) to protect against accidental or malicious deletions.
+
+- **Tagging & Classification**
+  - **Tags (key–value pairs)** let you label buckets for:
+    - Business purpose (e.g., `type=financial-documents`).
+    - Ownership (e.g., `owner-employee-id=12345`).
+  - Useful for **cost allocation**, search, and governance.
+
+- **Intelligent Tiering & Archive Strategy**
+  - Configures how data moves into **archive tiers** using policies.
+  - Policies can target:
+    - The **entire bucket**, or
+    - Specific subsets via **filters** (e.g., certain folders/prefixes).
+  - AWS enforces **transition windows**:
+    - Typically **> 90 days up to 730 days**.
+    - “Digital tape” ranges like **180–730 days**.
+  - Retrieval latency as a business tradeoff:
+    - Archive: ~**3–5 hours**.
+    - Deep/digital tape: ~**12 hours**.
+    - Faster retrieval possible for higher cost—relevant for audits where data is rarely needed but must be recoverable.
+
+- **Auditability & Logging**
+  - **Server access logging**:
+    - Low-level, request-by-request logs of S3 access.
+  - **CloudTrail data events**:
+    - Tracks selected S3 API calls (e.g., PUT/GET) with **who/when/what** for forensic analysis.
+  - Together, they support strong **audit and compliance** requirements.
+
+- **Event-Driven Automation**
+  - **Event notifications** trigger workflows when objects change, instead of using cron/polling.
+  - Can be scoped by:
+    - Bucket.
+    - Prefix (folder).
+    - File type (e.g., `*.pdf`).
+  - Targets: **Lambda**, **SNS**, **SQS**.
+  - Example uses:
+    - On new PDF upload, **parse invoice** into financial records.
+    - On log file upload, **send to Elasticsearch** (or a similar search/analytics system).
+
+- **Performance & Delivery Features**
+  - **Transfer Acceleration**:
+    - Uses AWS **edge locations** to speed up long-distance uploads/downloads.
+    - Improves global latency at an **extra cost**.
+  - **Object Lock reminder**:
+    - WORM compliance setting.
+    - **Cannot be enabled after bucket creation**, so must be planned upfront.
+
+- **Billing & Access Models**
+  - **Requester Pays**:
+    - Shifts data-transfer and request costs from the bucket owner to the **data consumer**, useful for customer- or partner-driven access patterns.
+
+- **Static Website Hosting**
+  - Bucket can serve a **static website**:
+    - Configure index and error documents.
+    - Host HTML, CSS, JS, images directly from S3.
+    - Can integrate with DNS (e.g., Route 53) to map a **custom domain**.
+  - Enables rapid deployment of simple websites without servers.
+
+Overall, the video connects each S3 Properties setting to practical outcomes: data protection, compliance, cost optimization, automated processing, and fast global access—directly supporting real-world architectures like your audit/document scenarios.
+
+---
+
+# S3 Lifecycle rules, Replication rules and Metrics
+
+---
+
+This video explains how **S3 Lifecycle rules, Replication rules, and Metrics** work together to control cost, data placement, and governance over time.
+
+---
+
+### 1. Lifecycle Rules (Cost & Data Aging)
+
+- **Purpose**: Automatically move objects through storage classes and/or delete them as they age, mainly for **cost optimization**.
+- **Scope choices**:
+  - Apply to the **entire bucket** or only to specific **prefixes/folders**.
+  - Apply to **current versions only** or **current + previous versions**.
+
+- **Transition timing constraints** (examples shown):
+  - Standard → **Standard-IA**: minimum **30 days**.
+  - Then **One Zone-IA**: at least **60 days**.
+  - Then **Glacier**: at least **90 days**.
+  - Deep archive / “tape-like” tier: around **180 days**.
+- **Cost consideration**:
+  - Each lifecycle transition is a **request** and costs money.
+  - Transitioning **many tiny objects** can make lifecycle costs add up.
+  - Recommended pattern: **bundle small files** into a TAR/ZIP before archiving.
+
+- **Expiration rules**:
+  - Object expiration must be consistent with the **transition schedule**.
+  - Example:
+    - Trying to **expire after 10 days** fails if data is set to transition to a 180‑day archive tier—timelines conflict.
+    - Setting **365-day expiration** yields a clean, logical progression in the summary.
+  - Multiple lifecycle rules can exist:
+    - E.g., a separate **fast “purge” rule** that just deletes, with no transitions.
+    - But overlapping rules can **neutralize or override** one another, so design carefully.
+
+---
+
+### 2. Replication Rules (Placement, DR, Sharing)
+
+- **Purpose**: Automatically **copy objects** from one bucket/region/account to another for:
+  - Cross-region **disaster recovery**.
+  - **Partner/vendor data sharing** (e.g., docs, pricing PDFs, contracts).
+- **Configuration highlights**:
+  - **Source → Destination** bucket/region; destination can be in **another account**.
+  - **Versioning is required on the destination**:
+    - Replication is **asynchronous**.
+    - Must safely handle overlapping updates, conflicts, and delete markers.
+  - An **IAM role** is created/granted so AWS has permission to replicate on your behalf.
+
+- **Cost & storage-class options**:
+  - Replicated objects can use a **different storage class** in the destination:
+    - E.g., source in Standard, destination in IA/cheaper class if it’s mainly a **backup copy**.
+- **Additional replication features**:
+  - **Replication Time Control (RTC)**: stricter SLA + **replication metrics** for compliance visibility (with CloudWatch costs).
+  - **Delete marker replication**:
+    - Controls whether **deletes in source** also delete in the **replica**.
+    - Important for aligning retention/compliance policy between regions/accounts.
+
+---
+
+### 3. Metrics, Inventory & Validation
+
+- **Inventory and metrics** are introduced as the **observation layer**:
+  - Help verify that **versioning, lifecycle transitions, and replication** work as configured.
+  - Provide reporting for:
+    - What is stored where.
+    - Which storage classes are used.
+    - Whether replication is healthy and meeting timing goals.
+- Sets the stage for **validating real behavior** rather than assuming rules are working.
+
+---
+
+
