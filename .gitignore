@@ -1,9 +1,7 @@
 delivery_schedule.pdf
 course_materials/cloud_foundations/officials_docs/*
 course_materials/cloud_computing_aws/AWS Academy Sign-up Guide-v1.2.pdf
-course_materials/cloud_computing_aws/CloudComputingOnAWS-1.docx
-course_materials/cloud_computing_aws/CloudComputingOnAWS-2.docx
 course_materials/cloud_computing_aws/AMI-v2.pdf
 course_materials/cloud_computing_aws/AWS Academy CLI Access v1.2.pdf
-course_materials/cloud_computing_aws/CloudComputingOnAWS-3.docx
+course_materials/cloud_computing_aws/CloudComputingOnAWS*
 labs/*

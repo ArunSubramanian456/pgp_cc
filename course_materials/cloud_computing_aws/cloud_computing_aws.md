@@ -2619,4 +2619,211 @@ This video explains how **S3 Lifecycle rules, Replication rules, and Metrics** w
 
 ---
 
+# S3 Versioning, Replication, Delete markers
+
+---
+
+### 1. Replication Only Applies Going Forward
+
+- **Replication is not retroactive**:
+  - When you create a replication rule, it only applies to **new changes** from that point onward.
+  - Existing folders/objects **do not automatically backfill** into the replica.
+- Immediately after setting up replication, it’s normal for the replica bucket to be **empty**.
+- To migrate historical data, you must either:
+  - Ask AWS Support for help (support ticket), or
+  - Write a **custom program/script** that reads from the source and uploads to the destination.
+
+---
+
+### 2. Versioning Basics & Version IDs
+
+- Hands-on test: open **two tabs** (source + replica), upload `trek.txt`, and watch behavior.
+- **List versions** view shows:
+  - Objects created **before** versioning was enabled have a **null version ID**.
+  - Objects created **after** enabling versioning get unique **version IDs**.
+- Re-uploading the same filename:
+  - Produces **multiple versions** under the same key.
+  - Default listing shows **only the latest version**.
+  - All versions are stored → **total storage used increases**.
+
+---
+
+### 3. Delete Markers & Soft Deletes
+
+- In a versioned bucket, a “delete” is actually a **soft delete**:
+  - S3 creates a **delete marker** as the latest “version.”
+  - The object disappears from the **default view**, but **older versions still exist**.
+- If **delete marker replication** is enabled:
+  - The delete marker is also **replicated to the destination**.
+  - The replica’s visible state (object appears deleted) matches the source.
+
+- **Recovery**:
+  - To restore the object, you **permanently delete the delete marker** in the source.
+  - This makes the object visible again in the source’s default listing.
+  - But this **does not automatically re-sync** the replica:
+    - The replica may stay “deleted” unless you explicitly re-copy or re-upload the object.
+    - This shows how **manual fixes** can introduce **drift** between source and replica.
+
+---
+
+### 4. Latency, Directionality & Operational Discipline
+
+- **Replication latency**:
+  - Real-world delay is visible when replicating across distant regions (e.g., Oregon → Mumbai).
+  - This delay can matter for **audits, SLAs, and consistency expectations**.
+- **One-way replication**:
+  - Replication flows **source → destination only**.
+  - Deleting or modifying objects in the **replica** does **not** affect the source.
+- Implications:
+  - You must design **permissions and processes** carefully so that:
+    - The replica is not casually modified or cleaned up in ways that break its value.
+    - Teams understand that the **source is the system of record** and replication is downstream.
+
+---
+
+# S3 Permissions
+
+---
+
+### 1. Sharing & Block Public Access
+
+- Permissions are framed as **intentional sharing**: deciding *who* can do *what* to *which* buckets/objects.
+- **Block Public Access** is a global safety net:
+  - Even if you attach a **valid public bucket policy**, S3 can **deny** it if block-public-access is on.
+  - Demonstrated by:
+    - Applying a public-read policy → **AccessDenied** on save.
+  - Key point: effective access = **policies + block-public-access + other higher-level controls**, not just valid JSON.
+
+---
+
+### 2. Bucket Policies & Policy Tools
+
+- **Bucket policies** are JSON documents attached to the bucket, controlling:
+  - Which principals (accounts, IAM users, anonymous `*`) can perform which actions.
+- Built-in examples show patterns such as:
+  - Allowing multiple AWS accounts `PutObject` and `PutObjectAcl` with a condition that they use **canned ACL `public-read`**.
+  - Allowing **anonymous read-only GetObject**, optionally restricted by **source IP**.
+- **Policy Generator**:
+  - Wizard-style tool to generate correct S3 policy JSON without hand-writing it.
+
+- After disabling **block public access**:
+  - The same public policy can be saved.
+  - S3 UI clearly marks the bucket as **public** and shows warnings.
+
+---
+
+### 3. Targeted, Least-Privilege Access
+
+- The video then narrows scope from “public” to **specific IAM identities**:
+  - Uses **ARNs** to grant a single IAM user:
+    - `GetObject`, `ListBucket`, `PutObject` permissions.
+    - **No Delete** permissions.
+  - Reinforces **least privilege**:
+    - Give only the needed actions, and only on the required resources (bucket + prefix, etc.).
+
+---
+
+### 4. Object Ownership & Third-Party Uploads
+
+- Problem: when **partners/vendors** upload objects, they may own those objects.
+  - This can complicate control and lifecycle.
+- **Bucket owner preferred** option:
+  - Ensures the **bucket owner** becomes the owner of newly uploaded objects.
+  - Important for shared workflows where the bucket owner must reliably manage all content.
+
+---
+
+### 5. ACLs vs Policies
+
+- **ACLs (Access Control Lists)** are introduced as an older, object-level way to grant read/write to specific AWS accounts or public.
+- They **overlap** with bucket policies, but:
+  - Bucket policies are generally preferred for **centralized, scalable control**.
+  - ACLs remain useful in some cross-account or legacy scenarios.
+
+---
+
+### 6. CORS for Browser-Based Access
+
+- **CORS (Cross-Origin Resource Sharing)** is vital for browser/JS use cases:
+  - Example: a static website hosted on one S3 endpoint calling **S3 APIs on another endpoint** (different origin).
+  - CORS rules define which origins, methods, and headers are allowed, enabling those browser calls to succeed.
+
+---
+
+### 7. Access Points for Large-Scale Sharing
+
+- **Access points** are shown as a scalability and manageability feature:
+  - Multiple, named entry points to the **same underlying bucket**.
+  - Each access point can have its own **policy**, making it easier to:
+    - Serve many different teams/users.
+    - Apply **fine-grained access** to large shared datasets without endlessly editing a single, huge bucket policy.
+
+---
+
+# S3 Storage Lens overview, Historical UI updates
+
+---
+
+### 1. Batch Operations vs Custom Scripts
+
+- **Batch Operations**:
+  - Used to perform **bulk actions** on many objects as “jobs” (e.g., apply tags, change storage class, run Lambda per object).
+  - Operates on a list of objects without you managing servers.
+- Compared with:
+  - Writing a **custom EC2 program** to iterate over objects (e.g., generate thumbnails for thousands of images).
+- Takeaway: Batch jobs let you avoid provisioning and maintaining compute just to run repetitive bulk work.
+
+---
+
+### 2. Access Visibility with S3 Access Analyzer
+
+- **S3 Access Analyzer** gives an overview of:
+  - Access patterns by **authenticated/unauthenticated**, public, and cross-account users.
+- Helps you:
+  - See **who can access what**.
+  - Understand and validate sharing/permission configurations for governance.
+
+---
+
+### 3. Storage Lens for Cross-Account Analytics & Cost Control
+
+- **S3 Storage Lens**:
+  - Aggregates storage metrics across:
+    - **All buckets**, all **regions**, and
+    - Multiple accounts in an **AWS Organization**.
+  - Provides dashboards, tabs, and filters to analyze:
+    - Total storage.
+    - Growth trends.
+    - Data distribution (e.g., by storage class, bucket).
+- Operational detail:
+  - Cannot be used from the **root account**.
+  - Must use an **IAM identity** with the right permissions (shown by switching accounts to see the dashboard).
+- Cost connection:
+  - By **monitoring where data and cost are growing**, you can:
+    - Apply or tune **lifecycle rules**.
+    - Add **purge/delete rules**.
+  - Goal: keep storage usage and spend within acceptable thresholds over time.
+
+---
+
+### 4. Cleanup & Bucket Deletion
+
+- **Buckets must be empty before deletion**:
+  - You must explicitly **empty the bucket** first.
+  - Then confirm deletion.
+- Reinforces deliberate, careful cleanup and prevents accidental large-scale data loss.
+
+---
+
+### 5. Enduring Principles vs UI Changes
+
+- S3’s **console UI has changed a lot** (e.g., since 2015), but key behaviors have stayed the same:
+  - **Globally unique bucket names**.
+  - **Versioning** semantics, including **delete markers**.
+  - **Lifecycle transitions** between storage classes.
+- Core message:
+  - Learn the **underlying principles and mental models**.
+  - They remain valid even as the **features and interface evolve**, making your knowledge future-proof.
+
+---
 
