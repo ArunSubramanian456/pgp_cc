@@ -2827,3 +2827,60 @@ This video explains how **S3 Lifecycle rules, Replication rules, and Metrics** w
 
 ---
 
+# Overview of Virtual Private Cloud
+
+---
+
+This video introduces **Amazon VPC** as your core AWS networking building block and explains how IP planning, subnets, and routing shape a secure, scalable network.
+
+- **What a VPC Is**
+  - A **logically isolated private network** inside your AWS account.
+  - Lets instances communicate within a protected boundary, with **controlled** access to other networks and the internet.
+
+- **Subnets & Availability Zones**
+  - **Subnets** are smaller network segments **inside a VPC** where you launch EC2 instances.
+  - Relationship to AZs:
+    - A subnet lives in **one AZ**.
+    - An AZ can contain **multiple subnets**.
+  - You typically design separate **public** and **private** subnets per AZ.
+
+- **CIDR & IP Address Planning**
+  - **CIDR blocks** define the IP address space for:
+    - The **VPC** (overall range).
+    - **Subnets** (must be subsets of the VPC CIDR).
+  - IPv4 is **32 bits**; capacity from a prefix is `2^(32 − prefix)`:
+    - `/16` → ~65,536 addresses.
+    - `/22` → 1,024 addresses.
+    - `/32` → **1 specific IP** (useful for “allow exactly this source IP” rules).
+  - Subnet CIDR design is a key up-front decision that impacts future scaling.
+
+- **AWS Address Reservations (“n − 5” Rule)**
+  - Each subnet loses **5 IPs** reserved by AWS:
+    - `.0` – network address.
+    - `.1` – VPC router.
+    - `.2` – DNS.
+    - `.3` – reserved for future use.
+    - `.255` – broadcast.
+  - Effective usable addresses per subnet = **total − 5**.
+
+- **Expanding Address Space**
+  - You can attach **multiple CIDR blocks** to a VPC:
+    - One **primary CIDR** plus up to **four secondary CIDRs** (non-overlapping).
+  - Allows you to grow IP capacity later without creating an entirely new VPC.
+
+- **Connectivity: Peering, Routing, Internet/NAT**
+  - **VPC Peering**:
+    - Connects two VPCs so they can route traffic directly.
+    - Limitation: **no transitive peering**—A↔B and B↔C does *not* imply A↔C; you need explicit peerings.
+  - **Route tables**:
+    - Control where traffic goes (within the VPC, to peers, to the internet, etc.).
+  - **Internet Gateway (IGW)**:
+    - Allows internet access for subnets that route to it.
+  - **NAT (Gateway/Instance)**:
+    - Lets **private subnets** initiate outbound internet connections (e.g., patching, downloads) without being directly reachable from the internet.
+
+- **Best Practice: Avoid the Default VPC for Production**
+  - The default VPC is **convenient but permissive**.
+  - For production, design a **custom, more restrictive topology** (tighter subnets, controlled routes, locked-down security) to better protect critical data.
+
+---
