@@ -2884,3 +2884,259 @@ This video introduces **Amazon VPC** as your core AWS networking building block 
   - For production, design a **custom, more restrictive topology** (tighter subnets, controlled routes, locked-down security) to better protect critical data.
 
 ---
+# Hybrid Cloud and Networking
+---
+
+### 1. Cloud Deployment Models & Why Hybrid Matters
+
+- Four models are introduced:
+  - **Public cloud** (e.g., AWS).
+  - **Private cloud** (on-prem or dedicated).
+  - **Community cloud** (shared by similar organizations).
+  - **Hybrid cloud** (mix of on‑prem + cloud).
+- Focus quickly narrows to **hybrid cloud** because:
+  - Large enterprises already have significant **on‑prem data centers, networks, and servers**.
+  - They still want AWS benefits (VPC, EC2, analytics, managed services).
+- Goal: make **on‑prem + AWS** feel like **one cohesive network**.
+
+---
+
+### 2. Connectivity: VPN vs Direct Connect
+
+- **Site-to-Site VPN**:
+  - Connects on‑prem network to an AWS **VPC over the Internet**.
+  - Requires **non-overlapping CIDR blocks** between on‑prem and VPCs.
+- **AWS Direct Connect**:
+  - **Dedicated fiber link** from your network to AWS via a Direct Connect location.
+  - Bypasses the Internet → better **security, latency, and bandwidth**.
+  - Common for **security-sensitive** sectors (e.g., financial institutions).
+  - Bandwidth:
+    - **1 Gbps+**: provisioned directly with AWS.
+    - **Lower speeds**: provided through **AWS partners**.
+
+---
+
+### 3. Data Movement Strategies
+
+- **Incremental / ongoing transfer**:
+  - Continuous synchronization or streaming → **Direct Connect** is ideal.
+- **One-time large migrations**:
+  - **Snowball / Snowball Edge**:
+    - Rugged, suitcase-sized devices shipped by AWS.
+    - For “large but tractable” data sets.
+  - **Snowmobile**:
+    - A **truck** full of storage, parked at your data center.
+    - For **extreme-scale** data transfers (multi‑PB/EB).
+
+---
+
+### 4. Network Foundations: IP Ranges & VPC Design
+
+- **Private IPv4 ranges**:
+  - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
+- **IPv4 exhaustion & IPv6**:
+  - IPv4 is limited; AWS supports **IPv6** to address scale and address scarcity.
+- **Internal vs external IPs**:
+  - External/public IPs: SSH from the Internet, public-facing services.
+  - Internal/private IPs: app-to-app communication inside the VPC or data center.
+
+- **VPC CIDR design rules**:
+  - CIDR sizes typically between **/28 and /16** for VPC/subnets.
+  - Must be **non-overlapping** with:
+    - On‑prem networks.
+    - Other peered VPCs.
+  - You **cannot resize** a VPC CIDR once created.
+  - For growth, attach **secondary CIDR blocks** (extra, non-overlapping ranges).
+
+---
+
+### 5. Traffic Flow & Security Controls
+
+- End-to-end traffic path:
+  - **Internet / Direct Connect / VPN**  
+    → **Gateway (IGW/VGW/DX GW)**  
+    → **VPC router** & **route tables**  
+    → **Network ACLs (NACLs)**  
+    → **Security groups**  
+    → **EC2 / resources**.
+- **Ephemeral ports**:
+  - High-numbered ports used dynamically for return traffic and client connections.
+- **Stateless NACLs vs stateful security groups**:
+  - **NACLs**:
+    - Stateless; need **explicit rules** for both inbound and outbound.
+    - Operate at **subnet** level.
+  - **Security groups**:
+    - Stateful; **responses automatically allowed**.
+    - Attached to **ENIs/instances**, typically your main line of defense.
+
+---
+
+### 6. AWS VPC Limits & Planning
+
+- Highlights key limits such as:
+  - **VPCs per region** - default 5 per region; can request to increase service quota
+  - **Subnets per VPC** - 200 subnets per VPC
+  - Number of **CIDR blocks** per VPC. - 5 IPV4 and 5 IPV6 CIDR blocks default
+  - **Elastic IP** allocation limits.
+  - **NACL rule** limits.
+- Emphasis: do **proactive capacity and CIDR planning** so you don’t hit hard limits mid-scale, especially in hybrid environments where renumbering is painful.
+
+---
+
+# Creating Secure Deployments
+
+--- 
+
+This video walks through designing a **secure, production-grade VPC architecture**, combining VPCs, subnets, routing, security groups, peering, and NAT into one coherent pattern.
+
+---
+
+### 1. Custom VPC & Subnet Layout
+
+- Creates a **custom VPC** (not using the default) with:
+  - VPC CIDR: `10.0.0.0/16`.
+- Subdivides it into:
+  - **Public subnet**: `10.0.1.0/24`.
+  - **Private subnet A**: `10.0.2.0/24`.
+  - **Private subnet B**: `10.0.3.0/24`.
+- Capacity planning with `/24`:
+  - 256 total IPs − 5 AWS-reserved = **251 usable addresses per subnet**.
+
+---
+
+### 2. Routing & Internet Access
+
+- **Creating resources isn’t enough**; routing determines reachability.
+- Steps:
+  - Attach an **Internet Gateway (IGW)** to the VPC.
+  - But instances only reach the Internet if their **route table** has a default route (`0.0.0.0/0 → IGW`).
+- To avoid exposing all subnets:
+  - Do **not** put the Internet route into the default route table used by all subnets.
+  - Instead:
+    - Create a **custom route table**.
+    - Add `0.0.0.0/0 → IGW`.
+    - Associate this route table **only with the public subnet**.
+  - Result:  
+    - Public subnet → Internet-capable.  
+    - Private subnets → **no direct Internet access**.
+
+---
+
+### 3. Security Groups, DB Isolation & Bastion Host
+
+- **Security groups** enforce least privilege:
+  - Private DB server SG allows:
+    - MySQL (e.g., port 3306) **only from the public subnet’s instances**.
+    - ICMP (ping) from the public subnet (for testing).
+    - SSH (22) from trusted sources (often from bastion only).
+- **Admin access pattern**:
+  - Deploy a **bastion host (jump box)** in the **public subnet**:
+    - Has a **public IP**.
+    - Admins SSH into bastion from the Internet.
+  - From the bastion, SSH into **private instances** that:
+    - Have **no public IPs**.
+    - Are reachable only via private IPs inside the VPC.
+
+---
+
+### 4. Cross-VPC Connectivity with Peering
+
+- Uses **VPC peering** to connect this VPC to another:
+  - One VPC is the **requester**, the other the **acceptor/receiver**.
+  - Peering request must be **explicitly accepted**.
+- After peering:
+  - Each VPC’s **route tables** must be updated to include the **other VPC’s CIDR** via the **peering connection**.
+  - Example:  
+    - VPC A route: `10.1.0.0/16 → pcx-...`  
+    - VPC B route: `10.0.0.0/16 → pcx-...`
+- Connectivity validation:
+  - Allow ICMP in security groups and **ping private IPs** across VPCs.
+
+---
+
+### 5. NAT for One-Way Internet from Private Subnets
+
+- **NAT** gives private instances **outbound** Internet access without making them publicly reachable:
+  - Described as a **“one-way mirror”**.
+- Use case: private DB server needs to:
+  - Download **vendor security patches** or updates from the Internet.
+- Two NAT options:
+  - **NAT instance**:
+    - EC2 instance acting as NAT.
+    - Requires:
+      - Disabling **source/destination check**.
+      - Managing instance size, HA, patching yourself.
+    - Typically cheaper but more operational overhead.
+  - **NAT gateway**:
+    - Fully **managed**, highly available within an AZ.
+    - Scales automatically; more expensive.
+- Private subnet route table:
+  - Default route `0.0.0.0/0 → NAT` (instance or gateway).
+  - Keeps inbound access blocked while allowing outbound traffic.
+
+---
+
+# VPC EndPoints, Services & Route 53
+
+---
+
+
+### 1. VPC Endpoints & Endpoint Services
+
+**VPC endpoints (consumer role)**
+
+- Purpose: Let resources inside a VPC access **AWS-managed services** (e.g., DynamoDB, S3) **without using the public internet**.
+- Without an endpoint:
+  - EC2 → traffic exits via **Internet Gateway (IGW)** → public DynamoDB endpoint → back.
+  - Service must be **publicly reachable**, even if locked down by IP/SG.
+- With a VPC endpoint:
+  - EC2 → traffic stays on **Amazon’s private network**.
+  - No public IPs / IGW path required for those calls.
+  - Security benefits: reduces internet exposure; services feel **local to the VPC**.
+
+**Endpoint services (producer role)**
+
+- Invert the model: your VPC becomes a **service provider**.
+- An app in one VPC is exposed to **other VPCs** via a **private endpoint**, not via:
+  - Public load balancers.
+  - Public IP addresses.
+- Works across:
+  - Multiple VPCs.
+  - Multiple **accounts**.
+  - Even **customers / third parties**.
+- Enables **private, cross-VPC service delivery** entirely inside AWS’s network.
+
+---
+
+### 2. Route 53 & Global Resilience
+
+**Problem: regional failure**
+
+- Multi-AZ within one region (e.g., Singapore) doesn’t protect against **entire region outages**.
+- Pattern: deploy a **duplicate stack in another region** (e.g., Oregon).
+- Need a decision layer to:
+  - Route users to the **closest/fastest** healthy region.
+  - Fail over when one region is down.
+
+**Route 53 capabilities**
+
+- Described as **“domain management plus”**:
+  - Like GoDaddy for domain registration, but with advanced DNS routing.
+- Key routing policies:
+  - **Geolocation routing**: send users based on **where they are**.
+  - **Latency-based routing**: choose endpoint with **lowest network latency**.
+  - **Failover (primary/secondary)**: route to secondary when health checks fail on primary.
+  - **Weighted routing**: split traffic (e.g., **80/20**, **70/30**) for canaries, blue/green, or load sharing.
+  - Policies can be **combined**:
+    - Example: if geolocation is ambiguous (e.g., South Africa case), fall back to latency-based choice.
+
+**Outcome**
+
+- Route 53 maps **friendly domain names** (e.g., `app.example.com`) to:
+  - **Load balancers**, regional endpoints, or other targets.
+- Applies chosen policies to:
+  - Reduce **latency**.
+  - Increase **availability**.
+  - Provide controlled **traffic steering** across regions.
+
+---
