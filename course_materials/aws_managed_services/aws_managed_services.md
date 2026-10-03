@@ -179,3 +179,325 @@ This decouples producers and consumers and supports both system automation and h
 Overall, the exercise shows SNS as a simple but powerful, decoupled integration layer—tying together applications and users via topics, subscriptions, and configurable security, reliability, and logging controls.
 
 ---
+
+# SQS
+
+---
+
+**1. Core SQS Queue Behavior**
+
+- A queue is configured with:
+  - **Retention period** (e.g., 1 day): how long messages can remain in the queue before expiring.
+  - **Visibility timeout** (e.g., 30 seconds): how long a message is hidden after a consumer retrieves it, giving time to process and delete it.
+- A **producer** sends messages to an SQS queue named `content`.
+- **Consumers** (e.g., EC2 instances in any language using AWS SDKs) poll SQS for messages to process.
+
+**2. Elastic Scaling with Auto Scaling Groups**
+
+- As message volume rises, a single consumer cannot keep up.
+- Consumers are run in an **Auto Scaling group**:
+  - Scale **out** when message load increases.
+  - Scale **in** when load decreases.
+- This is presented as a **general scaling pattern**, not just for web servers or HTTP traffic.
+
+**3. Real-World Scenario: Accounting Invoices**
+
+- Example: an accounting firm where customers upload invoices to S3.
+  - Normal days: steady load.
+  - Quarter-end: sharp spike in invoice volume.
+- Problem: **format-dependent processing**.
+  - If a customer changes invoice layout (fields move, extra columns, etc.), consumer code may:
+    - Throw errors.
+    - Fail to delete messages.
+    - Cause a **backlog** in the main queue.
+
+**4. Handling Failures with Dead-Letter Queues (DLQs)**
+
+- To prevent “bad” messages from blocking good ones:
+  - A **dead-letter queue** (ReDrive queue) is configured.
+  - Messages that repeatedly fail processing are moved from the main queue to the **DLQ**.
+- This isolates problematic messages and keeps the primary “happy path” flowing.
+
+**5. Two-Path Architecture: Happy Path & Exception Path**
+
+- The system is split into two independently scalable paths:
+  - **Happy Path**:
+    - Auto Scaling group of consumers reading from the **main SQS queue**.
+    - Handles normal, correctly formatted invoices.
+  - **Exception Path**:
+    - Separate consumer group reading from the **DLQ**.
+    - Focuses on diagnosing why messages failed.
+    - After analysis, this path can:
+      - Use **SNS** to **notify customers** about the formatting issue.
+      - Remove or resolve the message from the DLQ.
+- This creates an **automated feedback loop** with minimal human intervention, keeping the core system healthy while exceptions are handled systematically.
+
+**6. Cost Awareness and SQS Pricing**
+
+- **Pay-per-use model**:
+  - You pay per **request**, not per running server.
+- **Standard vs FIFO queues**:
+  - **Standard**:
+    - Cheaper.
+    - Very high throughput.
+    - Best-effort ordering, at-least-once delivery.
+  - **FIFO**:
+    - More expensive.
+    - Lower throughput.
+    - Guarantees ordering and exactly-once processing.
+- **Request billing & payload chunking**:
+  - Each **64 KB** chunk of payload counts as **one request**.
+  - Example: a **256 KB** message is billed as **4 requests**.
+- The video stresses understanding these details to avoid cost surprises while scaling.
+
+---
+
+# Overview of CloudWatch
+
+--- 
+
+**1. What CloudWatch Is and Why It Exists**
+
+- CloudWatch is AWS’s **central monitoring service** for:
+  - Metrics (CPU, memory, I/O, etc.)
+  - Logs (application logs, system logs)
+- It integrates with **most AWS services**—both managed services and infrastructure (like EC2).
+- Goal: a **single, unified monitoring model** instead of separate tools and approaches per service.
+
+**2. Default vs Advanced Monitoring**
+
+- **Default (free) monitoring**:
+  - Provided out-of-the-box for many services (e.g., EC2, databases).
+  - Metrics typically collected at about **5-minute intervals**.
+  - Good for basic visibility when you don’t need very fine-grained detail.
+- **Advanced (paid) monitoring**:
+  - Higher-frequency metrics, sometimes down to **seconds**.
+  - Lets you **detect issues faster** (e.g., sharp CPU spikes).
+  - Costs vary by resource and metric resolution.
+
+**3. Centralized Dashboards and Log Organization**
+
+- CloudWatch offers **dashboards** to view data from many resources together:
+  - EC2, databases, and other services on a single screen.
+- Logs are grouped into **log groups**, which you can structure flexibly:
+  - Per-instance groups (e.g., one log group per EC2 instance).
+  - Per-application or per-database groups (e.g., one for each of five databases).
+- This helps keep logs **organized, targeted, and manageable**.
+
+**4. Extending Logs Beyond CloudWatch**
+
+- Logs in CloudWatch can be **exported to S3**, which enables:
+  - **Athena** queries over historical logs stored in S3.
+  - Feeding logs into a **search engine** (e.g., Elasticsearch/OpenSearch) via triggers.
+  - Loading into **Redshift** or other data warehouses for deeper analytics.
+- This turns CloudWatch into a **front door** for a broader analytics ecosystem.
+
+**5. Automation with Alarms and Alerts**
+
+- CloudWatch **alarms** watch metrics against thresholds and can:
+  - Trigger scaling actions for **Auto Scaling Groups** (e.g., CPU utilization too high → add instances).
+  - Fire actions on databases or other services, like starting data extraction or maintenance jobs.
+- This enables **event-driven operations**: metrics → alarms → automated actions or notifications.
+
+**6. “No-Effort” and Custom Monitoring**
+
+- Many metrics are **available by default** with almost no setup, giving you baseline visibility.
+- For **custom workloads**, you can use the **CloudWatch agent on EC2** to:
+  - Collect additional metrics and **custom log files** from many instances.
+  - Centralize them in CloudWatch for unified analysis and alerting.
+
+---
+
+# CloudWatch Demo
+
+---
+
+The video presents CloudWatch as a full operational hub for AWS: from raw metrics and logs to automated responses, tracing, and dashboards, all via the (new) console interface.
+
+**1. Alarms: Metrics → Action (Elasticity & Health)**  
+- Alarms watch metrics such as:
+  - EC2 CPU, network, or Application Load Balancer/target group metrics (e.g., pending requests).
+- They:
+  - Trigger **scaling policies** (add/remove instances).
+  - Provide a **state view** (OK/ALARM/INSUFFICIENT_DATA) for quick health checks.
+
+**2. Logs & “Self-Defending” Infrastructure**
+
+- **Log groups** are the main organizing unit.
+- Operational controls:
+  - **Retention settings** to avoid unbounded log growth.
+  - **Subscription filters** to stream logs or trigger automation.
+- Pattern with **CloudTrail logs**:
+  - Detect events like **EC2 instance creation** via filters.
+  - Invoke **Lambda** to enforce policy (e.g., terminate unauthorized instances).
+  - This creates a form of **self-defending infrastructure**.
+
+**3. CloudWatch Logs Insights: Querying at Scale**
+
+- Used to run queries against logs, especially **VPC Flow Logs**.
+- Example query:
+  - Find top 20 source IPs with **rejected TCP connections** → spot brute-force or scanning behavior.
+- These analytics can be automated:
+  - Lambda calls **CloudWatch Logs Insights APIs**.
+  - Based on results, apply mitigations:
+    - Update **VPC/EC2 Network ACLs**.
+    - Adjust **WAF rules** dynamically.
+
+**4. Metrics, Dashboards, and Events (EventBridge)**
+
+- **Metrics + Dashboards**:
+  - Visualize performance across many services in one place.
+  - Dashboards can be auto-refreshed, but refresh frequency has **cost implications**.
+- **EventBridge** (evolving from CloudWatch Events):
+  - Handles scheduled events (cron-like) and event routing.
+  - Supports:
+    - Cross-service integrations.
+    - **Third-party** and **cross-account** event flows.
+  - Used to wire CloudWatch insights into broader workflows.
+
+**5. Tracing, Containers, and Synthetic Monitoring**
+
+- **ServiceLens / AWS X-Ray**:
+  - Distributed tracing across microservices.
+  - Example: simple Python Flask app with X-Ray instrumentation to visualize request paths and latencies.
+- **Container Insights**:
+  - Observability for containerized workloads (e.g., ECS/EKS clusters).
+- **Synthetics**:
+  - Synthetic canaries that proactively hit URLs or endpoints.
+  - Detect issues before real users are impacted.
+
+**6. Cost Awareness & Right-Sizing Observability**
+
+- The video cautions about **over-monitoring**:
+  - Frequent dashboard refreshes and heavy use of advanced features can add cost.
+- Recommendation:
+  - Tune retention, refresh intervals, and query frequency.
+  - Balance **actionable visibility** with **cost control**.
+
+Overall, CloudWatch is framed as a layered observability and automation platform: collect (metrics/logs), analyze (Insights, tracing), decide (alarms, queries), and act (Lambda, EventBridge, ACL/WAF updates) to keep AWS workloads healthy, secure, and cost-efficient.
+
+--- 
+
+# RDS with Elasticache
+
+--- 
+
+### 1. From Traditional DBAs to Managed RDS
+
+- Historically, DBAs handled:
+  - Health checks, patching, backups, recovery
+  - Security configuration
+  - Log review and performance monitoring
+- **Amazon RDS** is introduced as a managed service that:
+  - Standardizes these tasks via the AWS console (instances, clusters, snapshots, events).
+  - Integrates with **CloudWatch** for monitoring.
+  - Offloads a large portion of routine operational work.
+
+---
+
+### 2. Creating and Configuring an RDS MySQL Instance
+
+The video creates a **MySQL RDS instance** and explains key decisions:
+
+- **Engine & Licensing**
+  - Choose engine (e.g., MySQL) and licensing model:
+    - Open-source engines vs commercial “Bring Your Own License” (BYOL).
+
+- **Compute & Storage**
+  - **Instance size**: CPU/RAM sizing and the need for **vertical scaling** in relational systems.
+  - **Storage**:
+    - SSD-backed volumes.
+    - IOPS tradeoffs (performance vs cost).
+
+- **Networking & Security**
+  - VPC and subnet selection.
+  - **Public access** vs private.
+  - Security groups (e.g., allowing MySQL on port **3306**).
+
+- **Reliability & Maintenance Settings**
+  - **Backups**:
+    - Automated backup retention (0–35 days).
+    - Backup windows in UTC.
+  - **Monitoring**:
+    - Enhanced monitoring with finer-grain metrics.
+    - Log export to **CloudWatch Logs**.
+  - **Maintenance**:
+    - Maintenance windows.
+    - Automatic minor version upgrades.
+
+These show how RDS bakes in operational best practices with tunable knobs.
+
+---
+
+### 3. High Availability and Scaling: Multi-AZ & Read Replicas
+
+- **Multi-AZ (High Availability)**
+  - Synchronous replication between **primary** and **standby** in the same region.
+  - Used for **failover**, not for read scaling:
+    - The standby does **not** serve reads.
+  - Protects against instance / AZ failures.
+
+- **Read Replicas (Scaling & Cross-Region Resilience)**
+  - **Asynchronous** replication from primary to read replicas.
+  - Good for **read scaling** and **cross-region** redundancy.
+  - Involves replication lag (Δt); data is eventually consistent, not instant.
+  - Example: creating a **cross-region read replica** in us-east-1 (N. Virginia):
+    - Initial data transfer uses a **snapshot**, then ongoing replication.
+
+---
+
+### 4. Application Integration Workflow
+
+The video then connects the database to actual applications:
+
+- **SQL Client Access**
+  - Connect to the RDS MySQL instance using standard SQL tools.
+  - Load a dataset (~300,000 records) to simulate real workload.
+
+- **Access from an EC2 Application**
+  - EC2-hosted Python app using `mysql-connector` to:
+    - Connect to RDS via its endpoint.
+    - Run queries against the loaded dataset.
+
+---
+
+### 5. Offloading Load with ElastiCache (Redis) – Cache-Aside Pattern
+
+To improve performance and reduce database load:
+
+- **ElastiCache (Redis)** is introduced.
+- Implements a **cache-aside** pattern:
+  - App checks **Redis** first.
+  - On cache miss:
+    - Fetch from RDS.
+    - Store result in Redis for future requests.
+- Concepts covered:
+  - **TTL** and **LRU** eviction to control cache size and staleness.
+  - Serialization (e.g., using **pickle**) to store objects in Redis.
+
+This shows how RDS + ElastiCache together improve scalability and response times.
+
+---
+
+### 6. Cross-Region Recovery and Promoting Replicas
+
+- The primary RDS instance is **deleted** to simulate region-level impact.
+- The previously created **cross-region read replica** is promoted to a **standalone database**.
+- Key operational point:
+  - The app must be prepared to **switch endpoints** (DNS/connection strings) to the new primary in the other region.
+  - This is crucial for disaster recovery strategies.
+
+---
+
+### 7. Overall Architecture Goal
+
+The video’s overarching message:
+
+- Use **managed services**:
+  - **RDS** for automated relational database operations (backups, patching, HA, monitoring).
+  - **ElastiCache (Redis)** for performance and load reduction.
+- Combine them to build:
+  - **Resilient** (Multi-AZ, cross-region replicas).
+  - **Scalable** (read replicas, cache).
+  - **Operationally streamlined** architectures.
+- Let teams focus on **application logic** instead of low-level database infrastructure and maintenance.
