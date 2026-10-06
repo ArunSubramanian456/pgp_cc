@@ -501,3 +501,252 @@ The video’s overarching message:
   - **Scalable** (read replicas, cache).
   - **Operationally streamlined** architectures.
 - Let teams focus on **application logic** instead of low-level database infrastructure and maintenance.
+
+---
+
+# Introduction to Serverless
+
+---
+
+The video explains serverless computing in AWS, focusing on Lambda functions, how they’re deployed, how they’re priced, and how they’re orchestrated with Step Functions.
+
+**1. What “Serverless” Really Means**
+
+- Teams **deploy code**, not servers or runtimes.
+- The cloud provider (AWS) handles:
+  - Infrastructure and OS
+  - Execution environment/runtime
+  - Elasticity/scaling behavior
+  - Much of the operational overhead and versioning
+- The practical focus is on **functions** as the main serverless unit.
+
+**2. Functions vs Applications, and AWS Lambda**
+
+- An **application** is made of multiple modules/classes.
+- **Functions** are the smallest unit of work inside those modules.
+- AWS’s serverless compute service is **AWS Lambda**.
+- Clarification: the name “Lambda” is unrelated to:
+  - Lambda architecture
+  - Language-level lambda expressions
+
+**3. Ways to Deploy Lambda Functions**
+
+Lambda supports different workflows, from simple to fully automated:
+
+- **In-console editing**
+  - Write and edit simple functions directly in the AWS Console editor.
+- **IDE-based development**
+  - Develop in an IDE (e.g., Eclipse), then push code to Lambda.
+- **Packaging with dependencies**
+  - For functions needing third-party libraries:
+    - Package code + dependencies (ZIP/container image).
+    - Deploy via **CLI** or tooling, details differ by language.
+- **CI/CD pipelines**
+  - Mature setups use CI/CD to:
+    - Build artifacts.
+    - Package them properly.
+    - Automatically deploy to Lambda as part of a pipeline.
+
+**4. Pricing: Pay for Execution, Not Servers**
+
+Because Lambda runs on ephemeral, provider-managed containers, traditional EC2-style pricing (per instance-hour) doesn’t fit. Instead, pricing is based on:
+
+- **Execution time** (duration per invocation).
+- **Allocated memory** during execution.
+- **Number of invocations**.
+- **Data processed** (stored/transferred where applicable).
+
+At the time discussed, there may be:
+- A **free tier** (e.g., first 1 million requests free).
+- Beyond that, charges in **fine-grained increments** of time and requests.
+
+**5. Composing Functions with AWS Step Functions**
+
+- Lambda functions are small, discrete units; many real workflows span multiple steps.
+- **AWS Step Functions** provide orchestration using **state machines**:
+  - Chain multiple Lambdas and services into end-to-end workflows.
+  - Support branching, retries, and long-running processes.
+- Positioned as core tooling for:
+  - **Distributed applications**
+  - **Microservices architectures**
+
+Overall, the video frames serverless (Lambda + Step Functions) as a shift from managing servers to managing **code and workflows**, with AWS handling infrastructure, scaling, and much of the operational complexity, and pricing aligned to actual function usage.
+
+---
+
+# Packing a Function & Dependencies
+
+---
+
+The video explains how to reliably *package* serverless functions (mainly for AWS Lambda) so that they have everything they need to run at invocation time, across different runtimes.
+
+---
+
+### 1. Why Packaging Matters for Serverless
+
+- Lambda functions run inside **ephemeral, runtime-specific containers** created by AWS.
+- These containers **do not install dependencies on the fly**.
+- Therefore, your **deployment package** (usually a `.zip` or `.jar`) must be:
+  - **Self-contained**: includes function code + all required libraries.
+  - **Ready-to-run** the moment it is loaded into the container.
+
+This makes packaging a reliability discipline: mistakes in packaging often surface as runtime failures.
+
+---
+
+### 2. Runtime Differences, Same Goal
+
+- Packaging details differ by language/runtime (Python vs Java, etc.), but the **core objective is identical**:
+  - Ensure the runtime has **all code and dependencies** available and readable.
+- A key operational risk: **file permissions**.
+  - Overly restrictive read permissions (e.g., only owner can read: `-r--------`) can cause failures when Lambda tries to load files.
+  - You must ensure files are **globally readable** where needed.
+  - AWS docs provide:
+    - Required permission patterns.
+    - Example commands (including recursive chmod).
+    - Notes on platform differences (e.g., macOS specifics).
+
+---
+
+### 3. Python Packaging Scenarios
+
+**Scenario A: Only Using Built-In AWS SDKs**
+
+- If your function only uses AWS-managed SDKs (e.g., to talk to Kinesis, SES, DynamoDB) that the Lambda runtime already includes:
+  - **No extra bundling** is required.
+  - You can:
+    - Write code directly in the Lambda console UI.
+    - Deploy without additional packaging steps.
+  - This is ideal for “pure cloud-native” functions with **zero external dependencies**.
+
+**Scenario B: External Libraries or AWS CLI Usage**
+
+- When you need third-party or OS-level tools (e.g., image processing libraries, AWS CLI usage):
+  - You must create an **explicit deployment package**:
+
+    1. Create a **project directory**.
+    2. Put your `.py` files at the **root** of that directory.
+    3. Use `pip` to install dependencies **into that same directory** (no virtualenv inside Lambda):
+       - e.g., `pip install <lib> -t .`
+    4. Ensure correct **file permissions** (globally readable as needed).
+    5. **Zip the contents** (not the parent directory itself, depending on docs).
+    6. Upload the `.zip`:
+       - Directly through the Lambda console, or
+       - Via S3 and point Lambda at the S3 object.
+
+This guarantees that when Lambda mounts your code, all required Python modules are available.
+
+---
+
+### 4. Java Packaging Strategies
+
+For Java, you have two main approaches:
+
+- **Fat/uber JAR**:
+  - Bundle application classes **and all dependencies** into a single large `.jar`.
+  - Deploy that single jar as the Lambda artifact.
+
+- **JAR + dependencies directory (ZIP)**:
+  - Have a primary, small jar (e.g., “S3 interact” ~5.4 KB).
+  - Package it together with a `/lib` or similar directory containing dependency jars.
+  - Zip the main jar + dependency directory and deploy the resulting `.zip`.
+
+Again, the runtime must see all required classes on its classpath at invocation time.
+
+---
+
+### 5. Language-Agnostic Rule
+
+Across Python, Java, and other runtimes, the unifying principle is:
+
+> **Deploy code and all dependencies together in a single deployment artifact that the Lambda runtime can execute immediately.**
+
+- The format (`.zip`, `.jar`, fat jar, etc.) and build steps vary by language.
+- Permissions and packaging layout must follow AWS documentation.
+- But the goal never changes: **no missing libraries, no runtime downloads, no surprises at invocation.**
+
+---
+
+# Lambda Invocation types
+
+---
+
+The video explains how Lambda *invocation type* (synchronous vs asynchronous) shapes business process flow, responsiveness, and error handling—not just technical behavior.
+
+---
+
+### 1. Two Invocation Types: Synchronous vs Asynchronous
+
+- **Synchronous invocation**
+  - Caller **waits for the result**.
+  - Used when the response is needed immediately to continue the workflow.
+- **Asynchronous invocation**
+  - Caller **fires and doesn’t wait** (fire-and-forget).
+  - Lambda runs later; the caller doesn’t directly see success/failure.
+  - Requires separate handling of **state** and **results** (e.g., via state machines or follow-up processes).
+
+These semantics determine whether a business process is blocking or non-blocking and how you design error flows.
+
+---
+
+### 2. On-Demand Invocation (Caller Controls the Mode)
+
+When you invoke Lambda **directly**, you can choose the invocation type:
+
+1. **Application code → Lambda**
+   - Example: a web app on **Elastic Beanstalk** offloads business logic to Lambda functions.
+   - This supports:
+     - Moving toward **microservices** and **cloud-native** designs.
+     - A web tier that calls discrete functions for specific tasks.
+   - The application decides:
+     - **Synchronous**: must wait for Lambda’s result before responding to the user.
+     - **Asynchronous**: can trigger work and continue; results are handled later.
+       - Implies:
+         - Tracking state elsewhere (e.g., a **state machine** via Step Functions).
+         - Integrating results through an alternate process path.
+
+2. **Manual invocation (e.g., AWS CLI)**
+   - For testing or ad-hoc runs.
+   - You explicitly choose sync or async behavior in the CLI/API.
+
+---
+
+### 3. Event-Driven Integrations (Mode is Predefined)
+
+When other AWS services invoke Lambda as **event sources**, the invocation type is **fixed** by the service; you cannot override it.
+
+Examples:
+
+- **S3 events → Lambda**
+  - Always **asynchronous**.
+  - S3 does *not* wait to know if:
+    - Lambda succeeded
+    - Failed
+    - Errored
+    - Timed out
+
+- **Cognito triggers → Lambda**
+  - Always **synchronous**.
+  - Authentication needs an immediate allow/deny decision, so Cognito waits for Lambda’s result.
+
+- **Poll-based services (Kinesis, SQS)**
+  - Treated as **synchronous** in behavior:
+    - Lambda polls messages, processes them, and the poll/process loop **depends on** that work completing.
+    - The processing result affects how the polling workflow continues (e.g., delete from queue, retry, etc.).
+
+---
+
+### 4. Why Invocation Semantics Matter
+
+Choosing—and understanding—invocation type early is critical because it determines:
+
+- Whether callers **block** or continue immediately.
+- How and where you **track state** and **correlate results**.
+- How you design **error handling**, retries, and compensating actions.
+- The broader **business process structure**:
+  - Inline request–response vs.
+  - Event-driven, eventually consistent workflows.
+
+In short, invocation type is a core design decision for Lambda-based systems, directly shaping end-to-end process behavior and architecture.
+
+---
