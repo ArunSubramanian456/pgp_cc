@@ -750,3 +750,74 @@ Choosing—and understanding—invocation type early is critical because it dete
 In short, invocation type is a core design decision for Lambda-based systems, directly shaping end-to-end process behavior and architecture.
 
 ---
+
+# Lambda Console Demo
+
+---
+
+The video is a hands-on walkthrough of creating and configuring a basic AWS Lambda function in the console (using Node.js), using it to teach core Lambda, IAM, and configuration concepts.
+
+**1. Choosing a Runtime and Creation Path**
+
+- Node.js/JavaScript is used because it supports **inline editing** in the console, making iteration fast.
+- Contrast:
+  - **Java** typically needs pre-built **JAR** artifacts uploaded.
+  - **Node.js/Python** can be edited and tested directly in the UI, ideal for learning.
+- Three console entry points:
+  - **Author from scratch** (used in the demo).
+  - **Blueprints** (predefined templates).
+  - **Serverless Application Repository** (marketplace-like, partner/community apps).
+- The demo builds a minimal **echo function**: returns the same input it receives.
+
+**2. IAM Execution Role: Permissions to Run**
+
+- Lambda runs on AWS-managed infra but still needs **explicit IAM permissions**.
+- Without an execution role, the function **cannot run**.
+- The demo:
+  - Creates a reusable **“Lambda-multi role”** from a template that grants:
+    - Basic privileges like **CloudWatch Logs** access.
+  - Then extends this role in **IAM** with additional policies (e.g., `AmazonS3FullAccess`) so the function can:
+    - Use the AWS SDK to access S3.
+- Key idea: **execution role** = what the function is allowed to do in AWS.
+
+**3. Console Layout: Designer vs Code**
+
+- **Designer view**:
+  - Shows **triggers** (event sources) and **target resources** the function interacts with.
+  - Visual overview of integrations (e.g., S3 trigger, DynamoDB, etc.).
+- **Code/config view**:
+  - Shows the handler code and its configuration.
+  - Explains the Node.js handler signature (`event`, `context`, `callback`) and how input/output flow works.
+
+**4. Configuration Essentials**
+
+- **Environment variables**:
+  - Avoid hardcoding values (e.g., bucket names, table names).
+  - Example use cases:
+    - S3-triggered PDF-to-text workflow.
+    - DynamoDB table configuration.
+  - Can be encrypted with **KMS** for sensitive values.
+- **Memory & CPU**:
+  - Memory size is configurable; **CPU scales with memory**.
+  - Tuning memory can improve performance, not just capacity.
+- **Timeouts**:
+  - Max: **5 minutes**; default: **3 seconds**.
+  - Too-low timeouts cause functions to fail mid-work.
+  - The video shows a **real timeout debugging example** to stress correct timeout configuration.
+
+**5. Operational & Security Controls**
+
+- **VPC integration**:
+  - Option to run Lambda in a VPC for compliance / isolation and access to private resources.
+- **Tracing with X-Ray**:
+  - Can be enabled for distributed tracing and performance insight.
+- **Concurrency controls**:
+  - Default unreserved concurrency quota (e.g., **1000** concurrent executions).
+  - Ability to set **limits** for specific functions (emergency throttling or isolation).
+- **CloudTrail logging**:
+  - Records who invoked/configured functions and when.
+  - Supports audit, compliance, and forensic analysis.
+
+Overall, the video uses a simple Node.js echo function to teach how to create a Lambda, assign and extend its IAM role, configure runtime and environment settings, and apply operational controls—foundational skills for building real serverless applications on AWS.
+
+---
