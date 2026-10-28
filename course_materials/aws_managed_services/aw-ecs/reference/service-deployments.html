@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service Deployments</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0006-deploying-a-service.html">From lesson 6</a> · <a href="running-jobs.html">Running jobs</a> · <a href="fargate-networking.html">Networking</a> · <a href="task-definition-fields.html">Task definition fields</a> · <a href="ecs-building-blocks.html">Building blocks</a></nav>
+<h1>Deploying an ECS service</h1>
+<p class="subtitle">Rolling updates, health, rollback, traffic-shifting strategies.</p>
+
+<h2>Start a deployment</h2>
+<pre><code>aws ecs update-service --cluster C --service S --task-definition family:NEW_REVISION
+aws ecs update-service --cluster C --service S --force-new-deployment     # same revision, fresh tasks (e.g. rotated secret)</code></pre>
+<p>Two separate steps: <code>register-task-definition</code> saves the revision (image tag <strong>not</strong> checked) → <code>update-service</code> starts the deployment. A wrong tag only fails when an <code>:N</code> task launches and pulls: <code>CannotPullContainerError</code>, task never reaches RUNNING.</p>
+<p>Rollout state: <code>IN_PROGRESS</code> → <code>COMPLETED</code> (steady state) or <code>FAILED</code>.</p>
+
+<h2>Rolling update settings</h2>
+<div class="table-wrap"><table>
+  <tr><th>Setting</th><th>Meaning</th><th>Default</th></tr>
+  <tr><td><code>maximumPercent</code></td><td>Upper limit on running + pending tasks during a deployment, as a % of desiredCount</td><td>200</td></tr>
+  <tr><td><code>minimumHealthyPercent</code></td><td>Lower limit on healthy running tasks during a deployment</td><td>100</td></tr>
+  <tr><td><code>healthCheckGracePeriodSeconds</code></td><td>How long ECS ignores failed load balancer health checks after a task starts</td><td>0</td></tr>
+  <tr><td>Target group deregistration delay</td><td>How long old tasks keep finishing in-flight requests before they're stopped</td><td>300 s</td></tr>
+</table></div>
+<p>Zero downtime on Fargate: <strong>100 / 200</strong>. Set the grace period above your slowest startup (image pull + model load). <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">docs</a></p>
+<p>"Healthy" with a load balancer = target group health check passes, plus the container health check if defined.</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>ALB health check</th><th>Container health check</th></tr>
+  <tr><td>Where</td><td>Target group: HTTP from the ALB to task IP:port</td><td>Task definition <code>healthCheck</code>: a command inside the container, exit 0 = healthy</td></tr>
+  <tr><td>Proves</td><td>Reachable and replying (port, security groups, app)</td><td>The process is OK, with or without traffic</td></tr>
+  <tr><td>Startup allowance</td><td>Service <code>healthCheckGracePeriodSeconds</code></td><td><code>startPeriod</code> (0 to 300 s, off by default)</td></tr>
+  <tr><td>Defaults</td><td>Set on the target group</td><td>interval 30 s, timeout 5 s, retries 3</td></tr>
+  <tr><td>Use for</td><td>Services behind a load balancer</td><td>Anything, and the only option for workers with no ALB. The tool (curl) must be in the image.</td></tr>
+</table></div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Circuit breaker (rolling only)</h3>
+    <ul>
+      <li><code>{"enable": true, "rollback": true}</code></li>
+      <li>Stage 1: do tasks reach RUNNING? Stage 2: do they pass health checks?</li>
+      <li>Default threshold: 0.5 × desired, min 3, max 200 failed tasks</li>
+      <li>Rolls back to the last <code>COMPLETED</code> deployment (if none exists, the deployment just stops)</li>
+      <li>Alert on the <code>SERVICE_DEPLOYMENT_FAILED</code> event → SNS</li>
+    </ul>
+    <p><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Alarm-based rollback</h3>
+    <ul>
+      <li><code>"alarms": {"alarmNames": [...], "enable": true, "rollback": true}</code></li>
+      <li>Catches <em>healthy but wrong</em>: error rate, latency</li>
+      <li>The only failure detection for blue/green, linear and canary</li>
+    </ul>
+    <p><strong>Healthy ≠ correct.</strong> The circuit breaker only sees starting and health checks.</p>
+  </div>
+</div>
+
+<h2>Strategies (<code>deploymentConfiguration.strategy</code>)</h2>
+<div class="table-wrap"><table>
+  <tr><th>Strategy</th><th>Traffic</th><th>Use when</th></tr>
+  <tr><td><code>ROLLING</code></td><td>Tasks replaced in batches</td><td>The default; cheap; circuit breaker available</td></tr>
+  <tr><td><code>BLUE_GREEN</code></td><td>Everything shifts in one step</td><td>You want an instant switch and an instant rollback</td></tr>
+  <tr><td><code>LINEAR</code></td><td>Equal steps with a pause between them</td><td>Gradual, watched rollout</td></tr>
+  <tr><td><code>CANARY</code></td><td>A small % first, a pause, then the rest</td><td>A risky change, e.g. a new model architecture</td></tr>
+</table></div>
+<p>Bake time keeps the old version running after the shift, so rollback is instant. You pay for both versions meanwhile. <a href="https://aws.amazon.com/blogs/containers/gradual-deployments-in-amazon-ecs-with-linear-and-canary-strategies/">blog</a></p>
+</main>
+</body>
+</html>

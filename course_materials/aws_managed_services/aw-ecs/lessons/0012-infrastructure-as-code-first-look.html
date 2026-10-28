@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Infrastructure as Code</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0011-capstone-agent-assistant.html">← Lesson 11</a> · Lesson 12 · <a href="../reference/cdk-for-ecs.html">Cheat sheet</a></nav>
+
+<h1>Infrastructure as code: a first look</h1>
+<p class="subtitle">Your capstone's sandbox, written as about 50 lines of Python</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  You can read a CDK stack and point to which line carries which design decision from your capstone: subnets, security group, task definition, image, roles. You'll also know what CDK writes for you, and what you still have to decide yourself.
+</div>
+
+<h2>Warm-up</h2>
+<p>From the capstone. These are the ideas the review said were worth reinforcing. Answer from memory.</p>
+<div class="quiz" data-quiz="q-warmup12"></div>
+<script type="application/json" id="q-warmup12">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "The awslogs driver ships the sandbox's stdout to CloudWatch. Which role needs the logs permissions?",
+      "options": ["The task role", "The execution role", "The infrastructure role", "The service-linked role"], "answer": 1,
+      "why": "ECS sends the logs, not your code, so it's the execution role. Who makes the call decides the role." },
+    { "q": "Which object holds the subnets that a service's tasks run in?",
+      "options": ["The task definition itself", "The ALB's listener rules", "The service's network configuration", "The cluster's capacity provider"], "answer": 2,
+      "why": "The task definition is only the blueprint. The service (or the RunTask call) says where tasks go; the ALB has its own subnets." },
+    { "q": "The repositories use immutable date + commit tags, with weekly releases. Which lifecycle rule can break a running service?",
+      "options": ["Expire untagged images after seven days", "Keep the newest twenty tagged builds", "Expire tagged images after seven days", "Scan every image on each push"], "answer": 2,
+      "why": "A service keeps running last week's image until the next release. Expiring tagged images by age deletes it, and the next scale-out can't pull it." },
+    { "q": "Why does the API's task role need iam:PassRole to start sandbox runs?",
+      "options": ["It lets the sandbox call Bedrock", "It hands sandbox roles to ECS", "It opens port 443 to ECR", "It renews the API's own credentials"], "answer": 1,
+      "why": "RunTask asks ECS to start a task holding the sandbox's roles. IAM checks that the caller may pass exactly those roles." },
+    { "q": "The frontend calls assistant-api:8000. The request hangs, then times out. What do you check first?",
+      "options": ["The API task role's IAM policy", "The API security group's inbound rules", "The frontend's ECR lifecycle policy rules", "The public ALB's HTTPS listener certificate"], "answer": 1,
+      "why": "A hang ending in a timeout points at the network gate. AccessDenied would point at IAM." }
+  ]
+}
+</script>
+
+<h2>1 · What infrastructure as code is, and what CDK adds</h2>
+<p>So far you've designed everything on paper. Built by clicking in the console, it would be dozens of screens, hard to repeat and impossible to review. <strong>Infrastructure as code</strong> writes the same resources as a file you can read, review, version in git, and create or delete with one command.</p>
+<p><strong>AWS CDK</strong> lets you write that file in Python. It doesn't create anything itself: it turns your Python into a CloudFormation template, and CloudFormation creates the resources.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/v2/guide/home.html">[1]</a></sup></p>
+<pre><code>your Python stack ──cdk synth──▶ CloudFormation template ──cdk deploy──▶ VPC, ECR, task definition, roles…
+                                (JSON, often 10× longer)                  cdk destroy removes them all</code></pre>
+<p>CDK's building blocks are <strong>constructs</strong>. Most of what you'll use are ones with sensible defaults and helper methods: <code>ecs.FargateTaskDefinition</code>, <code>ec2.Vpc</code>, <code>ecr.Repository</code>. Their <code>grant…</code> methods write IAM policies for you, scoped to exactly the resources involved.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/v2/guide/constructs.html">[2]</a></sup> That matters, because roles were the hardest part of your capstone.</p>
+<p class="muted">You don't need an AWS account to read or even write CDK. You only need one to deploy it.</p>
+
+<h2>2 · The sandbox, as code</h2>
+<p>This is the piece of your design that uses Parts 1, 2, 3 and 6 at once. Before you click each highlighted block, say <strong>which part of your design it is</strong>, and what it's protecting against.</p>
+
+<div class="anno">
+<pre><code>from aws_cdk import Stack, Duration
+from aws_cdk import aws_ec2 as ec2, aws_ecs as ecs, aws_ecr as ecr, aws_s3 as s3, aws_logs as logs
+
+S3_PREFIX_LIST_ID = "pl-…"   # S3's address list for eu-west-2 (aws ec2 describe-managed-prefix-lists)
+
+class SandboxStack(Stack):
+    def __init__(self, scope, id, **kwargs):
+        super().__init__(scope, id, **kwargs)
+
+        <span class="a" data-k="vpc">vpc = ec2.Vpc(self, "Vpc", max_azs=2, nat_gateways=1,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(name="public",  subnet_type=ec2.SubnetType.PUBLIC),
+                ec2.SubnetConfiguration(name="app",     subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+                ec2.SubnetConfiguration(name="sandbox", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+                ec2.SubnetConfiguration(name="data",    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+            ])</span>
+        <span class="a" data-k="ep">vpc.add_gateway_endpoint("S3", service=ec2.GatewayVpcEndpointAwsService.S3)
+        for name, svc in [("EcrApi",    ec2.InterfaceVpcEndpointAwsService.ECR),
+                          ("EcrDocker", ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER),
+                          ("Logs",      ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS)]:
+            vpc.add_interface_endpoint(name, service=svc)</span>
+
+        <span class="a" data-k="repo">repo = ecr.Repository(self, "SandboxRepo",
+            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
+            lifecycle_rules=[
+                ecr.LifecycleRule(rule_priority=1, tag_status=ecr.TagStatus.UNTAGGED,
+                                  max_image_age=Duration.days(7)),
+                ecr.LifecycleRule(rule_priority=2, tag_status=ecr.TagStatus.TAGGED,
+                                  tag_pattern_list=["20*"], max_image_count=20),
+            ])</span>
+
+        bucket = s3.Bucket(self, "Artifacts", enforce_ssl=True,
+                           block_public_access=s3.BlockPublicAccess.BLOCK_ALL)
+
+        <span class="a" data-k="td">sandbox_td = ecs.FargateTaskDefinition(self, "SandboxTask",
+            cpu=1024, memory_limit_mib=2048,
+            runtime_platform=ecs.RuntimePlatform(
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+                cpu_architecture=ecs.CpuArchitecture.ARM64))</span>
+        <span class="a" data-k="ctr">sandbox_td.add_container("sandbox",
+            image=ecs.ContainerImage.from_ecr_repository(repo, tag="2026-10-24-a1b2c3d"),
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="sandbox",
+                                            log_retention=logs.RetentionDays.ONE_MONTH),
+            stop_timeout=Duration.seconds(30))</span>
+
+        <span class="a" data-k="grant">bucket.grants.read(sandbox_td.task_role, "runs/*")
+        bucket.grants.put(sandbox_td.task_role, "runs/*")</span>
+
+        <span class="a" data-k="sg">sandbox_sg = ec2.SecurityGroup(self, "SandboxSg", vpc=vpc, allow_all_outbound=False)
+        sandbox_sg.add_egress_rule(ec2.Peer.ipv4(vpc.vpc_cidr_block), ec2.Port.tcp(443),
+                                   "interface endpoints")
+        sandbox_sg.add_egress_rule(ec2.Peer.prefix_list(S3_PREFIX_LIST_ID), ec2.Port.tcp(443),
+                                   "S3 gateway endpoint")</span>
+
+        <span class="a" data-k="run"># in the API's stack:  sandbox_td.grant_run(api_task_definition.task_role)</span></code></pre>
+<div class="anno-notes">
+  <div data-k="vpc"><b>Part 2, subnets.</b> Four tiers in 2 AZs. <code>PRIVATE_WITH_EGRESS</code> gets a route to the NAT gateway (the API's way to the search and weather APIs). <code>PRIVATE_ISOLATED</code> subnets have <strong>no route to or from the internet</strong>, which is exactly what the sandbox and the database need.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ec2/README.html">[3]</a></sup> <code>nat_gateways=1</code> is the Part 8 budget decision: one NAT, not one per AZ, and you made that choice on purpose.</div>
+  <div data-k="ep"><b>Part 2, ways out.</b> The free S3 gateway endpoint, plus the three interface endpoints the sandbox can't start without: ECR API, ECR Docker and Logs. The API would add <code>SECRETS_MANAGER</code> and Bedrock runtime the same way. Each interface endpoint is one line here, and an hourly charge per AZ on the bill.</div>
+  <div data-k="repo"><b>Part 6, images.</b> Immutable tags, so a tag always means the same image. Two lifecycle rules: expire untagged images after 7 days, and keep the newest 20 builds. Notice what isn't here: a rule expiring <em>tagged</em> images by age, the trap from your first Part 6 answer.</div>
+  <div data-k="td"><b>Parts 1 and 8, the blueprint.</b> 1 vCPU and 2 GB, as the brief says, on ARM64 for about 20% less. Remember lesson 10's catch: the image must then be built for arm64. Note what's <em>missing</em>: no subnets, no security group. A task definition never holds them (your ALB question).</div>
+  <div data-k="ctr"><b>Parts 6 and 7, the container.</b> <code>from_ecr_repository(repo, tag=…)</code> pins one immutable tag, and also lets CDK grant the <strong>execution role</strong> permission to pull from this repository. <code>aws_logs</code> sets up awslogs with a one-month retention, and grants the execution role permission to write those logs. So the execution role's whole policy is written for you, which is the role you put "logs" on the wrong side of in Part 3. <code>stop_timeout</code> is lesson 2's SIGTERM-to-SIGKILL gap.</div>
+  <div data-k="grant"><b>Part 3, the sandbox's task role.</b> Read and write <code>runs/*</code> only. CDK writes the policy, scoped to that prefix.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_s3/README.html">[4]</a></sup> No Bedrock, no secrets, no database: those simply aren't granted, and nothing is allowed unless granted. (Older CDK versions write <code>bucket.grant_read(role, "runs/*")</code>.)</div>
+  <div data-k="sg"><b>Part 2, the sandbox's guard.</b> <code>allow_all_outbound=False</code> is the line that matters: without it, the group allows everything out, the default you asked about. Then two narrow exits: 443 inside the VPC (the interface endpoints) and 443 to S3's address list. No inbound rules at all. <code>S3_PREFIX_LIST_ID</code> is S3's published address list for the Region; you look it up once.</div>
+  <div data-k="run"><b>Part 3, PassRole, in one line.</b> <code>grant_run</code> gives the API's task role <code>ecs:RunTask</code> on this task definition <strong>and</strong> <code>iam:PassRole</code> for exactly its roles.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ecs/TaskDefinition.html">[5]</a></sup> The JSON you wrote by hand in the capstone, generated and scoped for you.</div>
+</div>
+</div>
+
+<div class="callout">
+  <strong>Where do the sandbox's subnets and security group go, then?</strong>
+  Into the <strong>API's RunTask call</strong>, at run time: <code>networkConfiguration</code> with the sandbox subnet IDs, <code>sandbox_sg</code>, and <code>assignPublicIp: DISABLED</code>. The stack passes those IDs to the API as plain environment variables. It's the same split as your ALB question: the blueprint doesn't say where; whoever starts the task does.
+</div>
+
+<h2>3 · What CDK writes for you, and what it doesn't</h2>
+<div class="table-wrap"><table>
+  <tr><th>CDK writes it for you</th><th>Still your decision</th></tr>
+  <tr><td>Route tables, NAT routing, endpoint DNS settings</td><td>Which subnet tier each piece lives in</td></tr>
+  <tr><td>The execution role and its ECR-pull and log-write policy</td><td>Which repository, which tag, how long logs are kept</td></tr>
+  <tr><td>Scoped IAM policies from <code>grant…</code> calls, including PassRole</td><td>What to grant at all (the sandbox gets almost nothing)</td></tr>
+  <tr><td>The ECR lifecycle policy JSON</td><td>Rules that can't delete a running image</td></tr>
+  <tr><td>Security group resources</td><td>Turning off "allow all outbound" for untrusted code</td></tr>
+</table></div>
+<p class="muted">Naming note: Python CDK writes <code>memory_limit_mib</code>; the online API reference sometimes shows it as <code>memory_limit_mi_b</code>. The code is a teaching sketch: <code>cdk synth</code> is the real check once you install CDK.</p>
+<p>CDK makes the <em>right</em> design shorter to write. It doesn't choose the design. Every highlighted line above is a decision you made in the capstone.</p>
+
+<h3>Where the rest of your design would go</h3>
+<ul>
+  <li><strong>frontend</strong>: <code>ecs_patterns.ApplicationLoadBalancedFargateService</code>, a ready-made construct that builds the public ALB, target group and service together, with tasks in your <code>app</code> subnets.</li>
+  <li><strong>assistant-api</strong>: <code>ecs.FargateService</code> with Service Connect settings, a container health check, secrets from Secrets Manager, and the scaling policies from Part 5.</li>
+  <li><strong>cluster</strong>: <code>ecs.Cluster</code> in the VPC, with Container Insights turned on.</li>
+</ul>
+
+<h2>Practice: spot the problem</h2>
+<div class="quiz" data-quiz="q-cdk"></div>
+<script type="application/json" id="q-cdk">
+{
+  "title": "Read the line, find the risk",
+  "shuffle": true,
+  "questions": [
+    { "q": "sandbox_sg = ec2.SecurityGroup(self, \"SandboxSg\", vpc=vpc). What's the problem?",
+      "options": ["Inbound traffic is allowed everywhere", "Outbound traffic is allowed everywhere", "The group needs a name", "Security groups need subnet IDs"], "answer": 1,
+      "why": "allow_all_outbound defaults to True. LLM-written code could then reach anything the subnets can route to, such as the API inside the VPC." },
+    { "q": "The sandbox repository is set to TagMutability.MUTABLE, and the container uses tag=\"latest\". What can go wrong?",
+      "options": ["ECR refuses mutable repositories now", "Fargate cannot pull mutable tags", "Runs may use different code", "Scanning is disabled for mutable"], "answer": 2,
+      "why": "Standalone tasks resolve the tag at every start (lesson 8). Two runs of the same revision can run different images." },
+    { "q": "bucket.grants.read_write(sandbox_td.task_role) with no key pattern. What's the risk?",
+      "options": ["Sandbox can access every object", "Sandbox cannot write any results", "Execution role loses ECR access", "Bucket becomes publicly readable now"], "answer": 0,
+      "why": "Without a pattern, the default is '*': the sandbox could read every conversation in the bucket. Scope it to runs/*." },
+    { "q": "What does sandbox_td.grant_run(api_role) add to the API's task role?",
+      "options": ["Bedrock access for the sandbox task", "RunTask plus PassRole for its roles", "A NAT route to the sandbox", "Inbound access from the API group"], "answer": 1,
+      "why": "grant_run writes ecs:RunTask on this task definition and iam:PassRole for exactly its task and execution roles." },
+    { "q": "The sandbox's subnets and security group aren't in its task definition. Where are they set?",
+      "options": ["In the sandbox task definition", "In the API's RunTask call", "In the ECR repository settings", "In the cluster's default settings"], "answer": 1,
+      "why": "Whoever starts a task says where it runs: a service's networkConfiguration, or the networkConfiguration in a RunTask call." },
+    { "q": "The stack sets nat_gateways=1 with max_azs=2. What did you trade away?",
+      "options": ["Outbound calls survive any AZ outage", "Isolated subnets for the sandbox tier", "Outbound calls if that AZ fails", "Interface endpoints in both availability zones"], "answer": 2,
+      "why": "One NAT is cheaper, but it lives in one AZ. If that AZ fails, tasks in the other lose their route to the search and weather APIs." }
+  ]
+}
+</script>
+
+<h2>When you get an account</h2>
+<pre><code>cdk bootstrap     once per account and Region: sets up what CDK needs to deploy
+cdk synth         print the CloudFormation template (works without deploying)
+cdk diff          what would change, before you change it
+cdk deploy        create or update the resources
+cdk destroy       delete them, so an experiment costs only the hours it ran</code></pre>
+<p class="muted">Habit worth forming: always run <code>cdk diff</code> before <code>cdk deploy</code>, and read it like a code review. It's lesson 6's "know what a deployment will do" applied to infrastructure.</p>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/cdk/v2/guide/home.html">What is the AWS CDK?</a> (AWS CDK Developer Guide), then the <a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ecs/README.html">aws_ecs module overview</a> for Python, which walks through task definitions, services and the ready-made patterns with examples like the ones above.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "what does the synthesized CloudFormation look like for the task definition?", "how would the API's service look in CDK?", "how do I pass the sandbox subnet IDs to the API?" or "what's the difference between CDK and Terraform?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> you've covered every goal in the mission at concept level. Options from here: write the API's service in CDK together, a spaced review page across all 12 lessons, or the hands-on lessons once you have an AWS account.</p>
+  <p>Cheat sheets: <a href="../reference/cdk-for-ecs.html">CDK for ECS</a> · <a href="../reference/design-review-checklist.html">Design review checklist</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/images-and-secrets.html">Images and secrets</a></p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/cdk/v2/guide/home.html">What is the AWS CDK?</a> · [2] <a href="https://docs.aws.amazon.com/cdk/v2/guide/constructs.html">CDK constructs</a> · [3] <a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ec2/README.html">aws_ec2 module (subnet types)</a> · [4] <a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_s3/README.html">aws_s3 module (grants with key patterns)</a> · [5] <a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ecs/TaskDefinition.html">ecs.TaskDefinition (grant_run)</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

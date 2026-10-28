@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CDK for ECS</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0012-infrastructure-as-code-first-look.html">From lesson 12</a> · <a href="design-review-checklist.html">Design review checklist</a> · <a href="fargate-networking.html">Networking</a> · <a href="images-and-secrets.html">Images and secrets</a></nav>
+<h1>CDK for ECS (Python)</h1>
+<p class="subtitle">Design decision → the line that carries it.</p>
+
+<h2>Flow</h2>
+<pre><code>Python stack ──cdk synth──▶ CloudFormation template ──cdk deploy──▶ resources      (cdk destroy removes them)
+cdk bootstrap (once per account/Region) · cdk diff before every deploy</code></pre>
+
+<h2>Snippets</h2>
+<div class="table-wrap"><table>
+  <tr><th>Decision</th><th>CDK</th></tr>
+  <tr><td>Subnet tiers</td><td><code>ec2.Vpc(…, max_azs=2, nat_gateways=1, subnet_configuration=[ec2.SubnetConfiguration(name=…, subnet_type=ec2.SubnetType.PUBLIC | PRIVATE_WITH_EGRESS | PRIVATE_ISOLATED)])</code></td></tr>
+  <tr><td>S3 gateway endpoint</td><td><code>vpc.add_gateway_endpoint("S3", service=ec2.GatewayVpcEndpointAwsService.S3)</code></td></tr>
+  <tr><td>Interface endpoint</td><td><code>vpc.add_interface_endpoint("EcrApi", service=ec2.InterfaceVpcEndpointAwsService.ECR)</code> (also <code>ECR_DOCKER</code>, <code>CLOUDWATCH_LOGS</code>, <code>SECRETS_MANAGER</code>)</td></tr>
+  <tr><td>Immutable repo + cleanup</td><td><code>ecr.Repository(…, image_tag_mutability=ecr.TagMutability.IMMUTABLE, lifecycle_rules=[ecr.LifecycleRule(tag_status=ecr.TagStatus.UNTAGGED, max_image_age=Duration.days(7)), ecr.LifecycleRule(tag_status=ecr.TagStatus.TAGGED, tag_pattern_list=["20*"], max_image_count=20)])</code></td></tr>
+  <tr><td>Task size + ARM</td><td><code>ecs.FargateTaskDefinition(…, cpu=1024, memory_limit_mib=2048, runtime_platform=ecs.RuntimePlatform(operating_system_family=ecs.OperatingSystemFamily.LINUX, cpu_architecture=ecs.CpuArchitecture.ARM64))</code></td></tr>
+  <tr><td>Image + logs (grants execution role pull + log write)</td><td><code>td.add_container("x", image=ecs.ContainerImage.from_ecr_repository(repo, tag="…"), logging=ecs.LogDrivers.aws_logs(stream_prefix="x", log_retention=logs.RetentionDays.ONE_MONTH))</code></td></tr>
+  <tr><td>Task role, scoped S3</td><td><code>bucket.grants.read(td.task_role, "runs/*")</code>, <code>bucket.grants.put(td.task_role, "runs/*")</code></td></tr>
+  <tr><td>Locked-down SG</td><td><code>ec2.SecurityGroup(…, allow_all_outbound=False)</code> + <code>add_egress_rule(peer, ec2.Port.tcp(443))</code></td></tr>
+  <tr><td>RunTask + PassRole</td><td><code>td.grant_run(caller_role)</code></td></tr>
+  <tr><td>Public ALB + service</td><td><code>ecs_patterns.ApplicationLoadBalancedFargateService</code></td></tr>
+</table></div>
+
+<h2>Remember</h2>
+<ul>
+  <li>Task definitions hold no subnets or security groups; the service or the RunTask call does.</li>
+  <li>Default security groups allow all outbound: turn it off for untrusted code.</li>
+  <li>Grants without a key pattern default to the whole bucket.</li>
+  <li>CDK writes the policies; you still choose what to grant.</li>
+</ul>
+<p><a href="https://docs.aws.amazon.com/cdk/api/v2/python/aws_cdk.aws_ecs/README.html">aws_ecs module</a> · <a href="https://docs.aws.amazon.com/cdk/v2/guide/home.html">CDK guide</a></p>
+</main>
+</body>
+</html>

@@ -821,3 +821,35 @@ The video is a hands-on walkthrough of creating and configuring a basic AWS Lamb
 Overall, the video uses a simple Node.js echo function to teach how to create a Lambda, assign and extend its IAM role, configure runtime and environment settings, and apply operational controls—foundational skills for building real serverless applications on AWS.
 
 ---
+
+# DevOps on AWS
+
+---
+
+The video explains how AWS services can automate a consistent software delivery lifecycle: **write code, commit it, build it, and deploy it**.
+
+- **CodeCommit** stores source code in a managed Git repository, supporting familiar workflows such as branches and local Git use.
+- **CodeBuild** builds the code and creates deployable artifacts. Build steps vary by language, but the goal is the same.
+- **CodeDeploy** deploys those artifacts to targets such as EC2 instances, Elastic Beanstalk, or Docker-based environments.
+- **CodePipeline** orchestrates the stages so a code commit can automatically trigger a build and deployment.
+
+Pipelines can support promotion from development to staging and production, with safeguards such as deploying only to instances selected by tags and adding manual approval gates. They can also connect to existing tools such as Jenkins.
+
+Overall, the video presents these services as a way to make software delivery repeatable, automated, and controlled across environments.
+
+---
+
+# Operations Workflow Details
+
+---
+The video demonstrates an end-to-end AWS delivery workflow for a Java web application, showing how source code moves from a development environment through build and deployment to production.
+
+- **Prepare the development environment:** Use a local machine or an EC2 instance as a cloud-based dev machine. Git connects to the repository over SSH. The example code is supplied as a tarball, which can be downloaded or copied to EC2.
+- **Authorize repository access:** IAM roles and permissions allow the development environment to push code to the repository.
+- **Build the application:** A build service pulls the source and runs it in an environment suited to the language and project. The build output is a deployable artifact, stored in S3.
+- **Deploy to a target:** A deployment service retrieves the artifact and deploys it to EC2 instances, tagged groups of instances, or container platforms such as ECS or EKS. The target could also be behind a load balancer.
+- **Manage deployment risk:** Blue-green deployments keep the current version intact while the new version is deployed, making rollback easier. In-place deployments update existing infrastructure and carry more risk.
+
+The main takeaway is that a **Git push can trigger an automated, repeatable pipeline** from source code through build and deployment to production.
+
+---

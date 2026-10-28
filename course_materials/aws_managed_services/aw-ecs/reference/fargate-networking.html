@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fargate Networking</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0003-networking-for-fargate.html">From lesson 3</a> · <a href="task-definition-fields.html">Task definition fields</a> · <a href="ecs-building-blocks.html">Building blocks</a></nav>
+<h1>Fargate networking</h1>
+<p class="subtitle">The standard layout, and what to check when something can't connect.</p>
+
+<h2>Standard layout</h2>
+<pre><code>Internet → internet gateway → ALB (public subnets, ≥2 AZs, sg-alb: 443 from 0.0.0.0/0)
+        → ip target group → tasks (private subnets, 2 AZs, sg-tasks: 8000 from sg-alb, no public IP)
+Tasks → out via NAT gateway (any internet) or VPC endpoints (AWS services only)</code></pre>
+
+<div class="grid">
+  <div class="card">
+    <h3>Two questions for every app</h3>
+    <p><strong>What may come in?</strong> APIs: an ALB. Batch, workers, planners: nothing.</p>
+    <p><strong>How does it get out?</strong> <em>Every</em> task needs a way out, at the very least to pull its image. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Load balancer rules</h3>
+    <ul>
+      <li>An ALB needs subnets in ≥2 different AZs. <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html">docs</a></li>
+      <li>Target type must be <strong><code>ip</code></strong> for awsvpc/Fargate. <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-taskset-loadbalancer.html">docs</a></li>
+      <li>ECS registers and deregisters task IPs automatically.</li>
+      <li><code>containerPort</code> must match <code>portMappings</code>.</li>
+      <li>Set <code>healthCheckGracePeriodSeconds</code> longer than your model's load time.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Ways out</h2>
+<div class="table-wrap"><table>
+  <tr><th>Option</th><th>Reaches</th><th>Use when</th></tr>
+  <tr><td>Public subnet + <code>assignPublicIp: ENABLED</code></td><td>Internet, directly</td><td>Experiments only</td></tr>
+  <tr><td>NAT gateway</td><td>Any internet destination (outbound only)</td><td>The task calls non-AWS services or package repositories</td></tr>
+  <tr><td>VPC endpoints</td><td>Specific AWS services, privately</td><td>No public internet needed</td></tr>
+</table></div>
+<p><strong>Endpoints a Fargate task (platform 1.4.0+) needs to pull from ECR privately:</strong> <code>ecr.dkr</code>, <code>ecr.api</code>, <strong>S3 gateway</strong> (image layers live in S3), plus <code>logs</code> (awslogs) and <code>secretsmanager</code> or <code>ssm</code> if you use secrets. <a href="https://repost.aws/knowledge-center/ecs-unable-to-pull-secrets">re:Post</a> · <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html">ECR docs</a></p>
+<p>Agents calling Bedrock from a private subnet need a NAT gateway or a Bedrock endpoint for the same reason.</p>
+
+<h2>Security groups</h2>
+<div class="table-wrap"><table>
+  <tr><th>SG</th><th>Inbound</th></tr>
+  <tr><td><code>sg-alb</code></td><td>443 from <code>0.0.0.0/0</code></td></tr>
+  <tr><td><code>sg-api-tasks</code></td><td>container port from <strong><code>sg-alb</code></strong> (reference the SG, not a CIDR)</td></tr>
+  <tr><td><code>sg-batch</code> (planner, workers)</td><td>none. Replies to its own outbound calls still get back in</td></tr>
+</table></div>
+
+<h2>Troubleshooting map</h2>
+<div class="table-wrap"><table>
+  <tr><th>Symptom</th><th>Check first</th></tr>
+  <tr><td>Task stuck PENDING, image pull fails, <code>ResourceInitializationError</code></td><td>Way out: NAT or ECR/S3 endpoints, then the execution role <a href="https://repost.aws/knowledge-center/ecs-fargate-tasks-pending-state">re:Post</a></td></tr>
+  <tr><td>Targets unhealthy, app logs show no requests arriving</td><td>Task SG allows the container port from <code>sg-alb</code></td></tr>
+  <tr><td>Targets healthy, customers time out</td><td>ALB SG allows 443 inbound, and the ALB is in public subnets</td></tr>
+  <tr><td>Tasks keep getting killed right after start</td><td>Health check grace period vs model load time</td></tr>
+  <tr><td><code>AccessDenied</code> from an AWS API</td><td>Not networking. It's the task role (the network path clearly works)</td></tr>
+</table></div>
+
+<h2>Port consistency</h2>
+<p>Every app port (e.g. Uvicorn's default 8000) must match in five places: the app's <code>--port</code>, <code>portMappings.containerPort</code>, the service's <code>loadBalancers.containerPort</code>, the target group port and health check, and the task SG inbound rule. Bind the app to <code>0.0.0.0</code>, not <code>127.0.0.1</code>. Customers use 443 on the ALB. <a href="https://www.uvicorn.dev/settings">Uvicorn docs</a></p>
+
+<h2>Config locations</h2>
+<p><strong>Task definition:</strong> <code>networkMode: awsvpc</code>, <code>portMappings</code>.</p>
+<p><strong>Service or RunTask:</strong> <code>networkConfiguration.awsvpcConfiguration</code> (subnets, securityGroups, assignPublicIp).</p>
+<p><strong>Service only:</strong> <code>loadBalancers</code> (targetGroupArn, containerName, containerPort), <code>healthCheckGracePeriodSeconds</code>.</p>
+<h2>Service-to-service: Service Connect</h2>
+<p>Call another ECS service by name (<code>http://assistant-api:8000</code>). ECS adds a proxy to each task that finds healthy tasks, spreads requests and reports metrics. AWS's recommended option for ECS-to-ECS calls; an internal ALB is the alternative. Task definition: name the port (<code>"name": "api"</code>). Server service: <code>serviceConnectConfiguration</code> with <code>services[].portName</code> + <code>clientAliases</code>. Client service: <code>{"enabled": true, "namespace": "…"}</code>. Security groups still decide who may connect. Applies on deployment. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect.html">docs</a></p>
+</main>
+</body>
+</html>

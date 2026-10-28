@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECS Building Blocks</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0001-ecs-building-blocks.html">From lesson 1</a></nav>
+<h1>ECS on Fargate: building blocks</h1>
+<p class="subtitle">One-page cheat sheet. Print it or keep it open.</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Task definition: blueprint</h3>
+    <p>JSON describing one or more containers: image, CPU/memory, ports, env, logs, IAM role, volumes. It's versioned, and every edit creates a new revision (<code>name:N</code>). <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Task: running copy</h3>
+    <p>One instance of a task definition. Its containers start and stop together and share <code>localhost</code>. Run it <em>standalone</em> for one-off jobs that exit. <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-cluster-details.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Service: keeps N alive</h3>
+    <p>Keeps a desired count of tasks running and replaces any that stop. This is where the load balancer, deployments and autoscaling attach. Use it for long-running apps like APIs. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Cluster: grouping</h3>
+    <p>A logical grouping of services and standalone tasks. On Fargate it's just a namespace and boundary (e.g. <code>staging</code>, <code>prod</code>), with no servers to manage.</p>
+  </div>
+</div>
+
+<h2>One task = one business purpose (+ sidecars)</h2>
+<ul>
+  <li>Multiple containers in one task are for <strong>sidecars</strong>: small helpers like log routers, observability agents or proxies that enhance <em>one</em> app container. <a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/application.html">docs</a></li>
+  <li>Frontend, API and worker each get their <strong>own task definition and service</strong>, so each scales and deploys on its own.</li>
+  <li>Multiple tasks = identical <strong>copies</strong>, for load and resilience.</li>
+  <li>Databases usually live outside ECS (e.g. RDS). Fargate task storage is temporary.</li>
+  <li>Test: put two containers in the same task only if they always run 1:1 <em>and</em> it's fine for them to restart together.</li>
+</ul>
+
+<h2>Revisions vs image tags</h2>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Example</th><th>Versions</th><th>Changes when</th></tr>
+  <tr><td>Image tag</td><td><code>my-api:v2</code></td><td>Code</td><td>You rebuild and push</td></tr>
+  <tr><td>Task def revision</td><td><code>api:7</code> (<code>family:revision</code>)</td><td>Settings around the code</td><td>Any edit. Revisions are never changed in place and only go up. <a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-task-definition/-builder/revision.html">docs</a></td></tr>
+</table></div>
+<p>A service points at one exact revision, so rolling back means pointing it back at the old one.</p>
+
+<h2>Pick the shape by the work</h2>
+<div class="table-wrap"><table>
+  <tr><th>Work looks like</th><th>ECS shape</th><th>Example from your domain</th></tr>
+  <tr><td>Request/response, always on</td><td>Service (+ load balancer, min/max autoscaling)</td><td>Forecast API, quick what-if LP</td></tr>
+  <tr><td>Runs, finishes, exits</td><td>Standalone / scheduled task</td><td>Nightly MILP planner, weekly retrain</td></tr>
+  <tr><td>Bursty, slow, many jobs</td><td>Queue + worker service</td><td>Scenario Lab: 200 what-if solves vs baseline</td></tr>
+  <tr><td>Helper bound 1:1 to an app</td><td>Sidecar in the same task</td><td>OTel collector beside an inference API</td></tr>
+</table></div>
+<p>Autoscaling: the desired count stays between the min and max you set, and target tracking adds or removes tasks to stay near a metric target. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">docs</a></p>
+
+<h2>Docker → ECS (analogy)</h2>
+<div class="table-wrap"><table>
+  <tr><th>Docker</th><th>ECS</th></tr>
+  <tr><td><code>docker run</code> flags</td><td>Task definition</td></tr>
+  <tr><td>A running container</td><td>Task</td></tr>
+  <tr><td>"keep 3 up, restart on crash"</td><td>Service</td></tr>
+  <tr><td>Your machine</td><td>Cluster (logical only on Fargate)</td></tr>
+</table></div>
+
+<h2>Fargate facts</h2>
+<ul>
+  <li>No servers to provision, scale, pick types for, or bin-pack. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">docs</a></li>
+  <li>Each task gets its own isolation boundary, with no shared kernel, CPU, memory or network interface. Tasks and compute are 1:1. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">docs</a></li>
+  <li>Network mode is always <code>awsvpc</code>, so every task has its own ENI. You choose its subnets and security groups. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">docs</a></li>
+  <li>CPU and memory are set at task level, from valid pairs. The smallest is 256 CPU units (.25 vCPU) with 512 MiB. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">docs</a></li>
+  <li>Set <code>requiresCompatibilities: ["FARGATE"]</code> in the task definition.</li>
+  <li><strong>Fargate Spot</strong> is cheaper but can be interrupted with a 2-minute warning. Use it for batch jobs and dev/staging. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-cluster-best-practice.html">docs</a></li>
+</ul>
+
+<h2>Who owns what on Fargate</h2>
+<div class="table-wrap"><table>
+  <tr><th class="you">You</th><th class="aws">AWS</th></tr>
+  <tr><td>Container image</td><td>Host OS and patching</td></tr>
+  <tr><td>Task CPU and memory</td><td>Picking and packing servers</td></tr>
+  <tr><td>Desired count and scaling rules</td><td>Per-task isolation</td></tr>
+  <tr><td>VPC, subnets, security groups</td><td>Supplying compute on demand</td></tr>
+</table></div>
+
+<h2>Compute options for ECS</h2>
+<div class="table-wrap"><table>
+  <tr><th>Option</th><th>Who runs the servers</th></tr>
+  <tr><td>Fargate / Fargate Spot</td><td>Nobody you can see. It's serverless.</td></tr>
+  <tr><td>ECS Managed Instances</td><td>AWS manages EC2 for you</td></tr>
+  <tr><td>Auto Scaling group (EC2)</td><td>You manage EC2</td></tr>
+</table></div>
+<p class="muted">Source: <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-create-capacity-provider.html">Create capacity providers</a>. Compared in detail in a later lesson.</p>
+</main>
+</body>
+</html>

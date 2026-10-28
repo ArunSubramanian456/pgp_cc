@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Debugging Playbook</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0009-debugging-and-observability.html">From lesson 9</a> · <a href="images-and-secrets.html">Images and secrets</a> · <a href="running-jobs.html">Running jobs</a> · <a href="service-deployments.html">Service deployments</a> · <a href="fargate-networking.html">Networking</a></nav>
+<h1>Debugging playbook</h1>
+<p class="subtitle">First question: did my code run?</p>
+
+<h2>Where the evidence lives</h2>
+<div class="table-wrap"><table>
+  <tr><th>How far it got</th><th>Look at</th></tr>
+  <tr><td>Service can't start tasks</td><td>Service events (Events tab / <code>describe-services</code>). Healthy = "has reached a steady state"</td></tr>
+  <tr><td>Stopped before your code</td><td><code>stopCode</code> (<code>TaskFailedToStart</code>) + <code>stoppedReason</code>; no exit code, no log stream</td></tr>
+  <tr><td>Code ran and exited</td><td>Exit code, then log stream <code>&lt;prefix&gt;/&lt;container&gt;/&lt;task ID&gt;</code></td></tr>
+  <tr><td>Running but slow/wrong</td><td>Container Insights metrics, then ECS Exec</td></tr>
+</table></div>
+<p>Stopped tasks are visible ~1 hour. Keep history: cluster <strong>event capture</strong> (Event History tab) or task state change events → EventBridge. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/resolve-stopped-errors.html">docs</a></p>
+
+<h2>Won't start: match the text</h2>
+<div class="table-wrap"><table>
+  <tr><th>You see</th><th>Likely cause</th><th>Check</th></tr>
+  <tr><td><code>CannotPullContainerError … not found</code></td><td>Tag/digest not in ECR (typo, unfinished push, lifecycle rule)</td><td>Image URI vs repo</td></tr>
+  <tr><td><code>… i/o timeout</code> (pull or secrets)</td><td>No network path</td><td>Public IP / NAT / VPC endpoints</td></tr>
+  <tr><td><code>ResourceInitializationError … AccessDeniedException</code></td><td>Execution role permission</td><td>Execution role policy</td></tr>
+  <tr><td><code>EssentialContainerExited</code>, exit 1</td><td>Your code crashed</td><td>Logs</td></tr>
+  <tr><td>Exit 137 / <code>OutOfMemoryError</code></td><td>Out of memory</td><td>Memory size, metrics</td></tr>
+  <tr><td>RUNNING, then replaced; failed health checks</td><td>Health check vs slow startup</td><td>Grace period / <code>startPeriod</code>, path</td></tr>
+</table></div>
+<p>Full list of categories: <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-error-codes.html">stopped task error messages</a>.</p>
+
+<h2>Logs (awslogs)</h2>
+<pre><code>"logConfiguration": { "logDriver": "awslogs", "options": {
+  "awslogs-group": "/ecs/APP", "awslogs-region": "REGION",
+  "awslogs-stream-prefix": "ecs",                 // required on Fargate
+  "mode": "non-blocking", "max-buffer-size": "25m" } }</code></pre>
+<ul>
+  <li>Default mode is <strong>non-blocking</strong> since June 2025 (may drop logs when the buffer fills); <code>blocking</code> can freeze the app. <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_LogConfiguration.html">docs</a></li>
+  <li>Execution role sends logs. Set a retention period on the log group.</li>
+</ul>
+
+<h2>Container Insights</h2>
+<p>Cluster setting <code>containerInsights</code>: <code>disabled</code> | <code>enabled</code> | <code>enhanced</code> (recommended; per-container detail). CPU, memory, disk, network per cluster/service/task; provides <code>RunningTaskCount</code>. Running tasks only. Extra cost. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/cloudwatch-container-insights.html">docs</a></p>
+
+<h2>ECS Exec</h2>
+<pre><code>aws ecs update-service --cluster C --service S --enable-execute-command --force-new-deployment
+aws ecs execute-command --cluster C --task ID --container NAME --interactive --command "/bin/sh"</code></pre>
+<ul>
+  <li>Only new tasks get it. Needs: Session Manager plugin locally; <strong>task role</strong> with <code>ssmmessages</code> permissions; NAT or <code>ssmmessages</code> endpoint.</li>
+  <li>Runs as root; 20-min idle timeout; not with <code>readonlyRootFilesystem</code>; audited in CloudTrail (<code>ExecuteCommand</code>).</li>
+  <li>Break-glass tool: keep off for locked-down tasks (e.g. code sandboxes). <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">docs</a></li>
+</ul>
+
+<h2>Container restart policy</h2>
+<pre><code>"restartPolicy": { "enabled": true, "ignoredExitCodes": [0], "restartAttemptPeriod": 300 }</code></pre>
+<p>Restarts one container in place (essential or not), without replacing the task. Must have run <code>restartAttemptPeriod</code> seconds first (60–1,800, default 300). Default: restart on any exit code. <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerRestartPolicy.html">docs</a></p>
+</main>
+</body>
+</html>

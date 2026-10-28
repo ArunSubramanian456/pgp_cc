@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Jobs</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0004-running-jobs.html">From lesson 4</a> · <a href="fargate-networking.html">Networking</a> · <a href="task-definition-fields.html">Task definition fields</a> · <a href="ecs-building-blocks.html">Building blocks</a></nav>
+<h1>Running jobs on Fargate</h1>
+<p class="subtitle">RunTask, the lifecycle, exit codes, scheduling.</p>
+
+<h2>RunTask parameters that matter</h2>
+<div class="table-wrap"><table>
+  <tr><th>Parameter</th><th>Rule</th></tr>
+  <tr><td><code>taskDefinition</code></td><td>Pin <code>family:revision</code>. If you leave out the revision, the latest one is used</td></tr>
+  <tr><td><code>count</code></td><td>≤ 10 per call</td></tr>
+  <tr><td><code>launchType</code> <em>or</em> <code>capacityProviderStrategy</code></td><td>Never both. Spot is only available through <code>capacityProviderStrategy: FARGATE_SPOT</code></td></tr>
+  <tr><td><code>networkConfiguration</code></td><td>Required for awsvpc: subnets, SGs, assignPublicIp</td></tr>
+  <tr><td><code>overrides</code></td><td>Command and environment for this run only. ≤ 8,192 characters in total</td></tr>
+  <tr><td><code>startedBy</code></td><td>Batch tag, ≤ 128 characters</td></tr>
+  <tr><td><code>clientToken</code></td><td>Idempotency: a retry with the same token and parameters returns the original task. Valid for up to 24h</td></tr>
+  <tr><td>response <code>failures</code></td><td>Always check it</td></tr>
+</table></div>
+<p class="muted"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">RunTask API</a> · <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_Idempotency.html">Idempotency</a></p>
+
+<h2>Lifecycle</h2>
+<pre><code>PROVISIONING → PENDING → ACTIVATING → RUNNING → DEACTIVATING → STOPPING → DEPROVISIONING → STOPPED
+ (ENI)          (wait)    (pull image,   (your     (deregister     (SIGTERM →   (delete ENI)
+                           containers,    code)     from LB)        SIGKILL)
+                           LB register)</code></pre>
+<p class="muted"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-lifecycle-explanation.html">Task lifecycle docs</a></p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Exit codes</h3>
+    <ul>
+      <li><code>0</code>: completed (make it mean "the plan was really written")</li>
+      <li><code>1</code>: application error, so check the logs</li>
+      <li><code>137</code>: SIGKILL, from out-of-memory or ignoring SIGTERM</li>
+      <li><code>143</code>: stopped by SIGTERM</li>
+    </ul>
+    <p><a href="https://repost.aws/knowledge-center/ecs-task-stopped">re:Post</a></p>
+  </div>
+  <div class="card">
+    <h3>stopCode (task level)</h3>
+    <ul>
+      <li><code>TaskFailedToStart</code>: it never ran (network, role, image)</li>
+      <li><code>EssentialContainerExited</code>: the main container ended. Check its exit code</li>
+      <li><code>UserInitiated</code>: someone called StopTask</li>
+    </ul>
+    <p>Stopped-task details stay in DescribeTasks for only about 1 hour, so capture them from <strong>task state change events</strong> through EventBridge → SNS.</p>
+  </div>
+</div>
+
+<h2>EventBridge Scheduler</h2>
+<ul>
+  <li>Cron has 6 fields: <code>cron(min hour day-of-month month day-of-week year)</code>, e.g. <code>cron(0 1 * * ? *)</code> = 01:00 daily. Use <code>?</code> in one of the two day fields. <a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html">docs</a></li>
+  <li>Set <code>ScheduleExpressionTimezone</code> so the job follows local time through daylight saving changes.</li>
+  <li>Templated ECS RunTask target: <code>EcsParameters</code> (TaskDefinitionArn required, LaunchType or CapacityProviderStrategy, NetworkConfiguration), overrides go in the input. <a href="https://docs.aws.amazon.com/scheduler/latest/APIReference/API_EcsParameters.html">docs</a></li>
+  <li>A <strong>third role</strong>: the Scheduler's execution role needs <code>ecs:RunTask</code> plus <code>iam:PassRole</code> for the task's roles.</li>
+  <li>Retry policy + DLQ cover <em>invocation delivery</em>, not job success.</li>
+</ul>
+
+<h2>The three roles so far</h2>
+<div class="table-wrap"><table>
+  <tr><th>Role</th><th>Used by</th><th>For</th></tr>
+  <tr><td>Scheduler execution role</td><td>EventBridge Scheduler</td><td>Calling RunTask on a schedule</td></tr>
+  <tr><td>Task execution role</td><td>ECS/Fargate</td><td>Pulling the image, sending logs, fetching secrets</td></tr>
+  <tr><td>Task role</td><td>Your code</td><td>S3, Bedrock, SQS calls at runtime</td></tr>
+</table></div>
+</main>
+</body>
+</html>

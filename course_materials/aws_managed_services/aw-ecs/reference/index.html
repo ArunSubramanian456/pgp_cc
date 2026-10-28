@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revision Cheat Sheets</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="../GLOSSARY.md">Glossary</a></nav>
+<h1>Cheat sheets for revision</h1>
+<p class="subtitle">One page per topic, in course order. Each links back to its lesson.</p>
+
+<div class="callout">
+  <strong>How to revise (so it sticks)</strong>
+  Don't just reread. Read a sheet's <em>headings only</em>, say out loud what's under each, then check. Do two or three sheets at a time, mixed from different parts of the course, a few days apart. Rereading feels productive but builds little; recalling first is what builds long-term memory.
+</div>
+
+<div class="callout">
+  <strong>Designing something new? Start here:</strong> <a href="ecs-design-flow.html">ECS design flow</a>. It covers steps 0 to 9 in order, and each step links to the detailed sheets below.
+</div>
+
+<div class="table-wrap"><table>
+  <tr><th>#</th><th>Cheat sheet</th><th>Revise it to recall…</th><th>Lesson</th></tr>
+  <tr><td>1</td><td><a href="ecs-building-blocks.html">ECS building blocks</a></td><td>Cluster, task definition, task, service; family:revision</td><td><a href="../lessons/0001-ecs-building-blocks.html">1</a></td></tr>
+  <tr><td>2</td><td><a href="task-definition-fields.html">Task definition fields</a></td><td>Execution vs task role, essential, ports, sizes, secrets, stopTimeout</td><td><a href="../lessons/0002-reading-a-task-definition.html">2</a></td></tr>
+  <tr><td>3</td><td><a href="fargate-networking.html">Networking</a></td><td>Public ALB + private tasks, SG chaining, NAT vs endpoints, Service Connect</td><td><a href="../lessons/0003-networking-for-fargate.html">3</a></td></tr>
+  <tr><td>4</td><td><a href="running-jobs.html">Running jobs</a></td><td>RunTask, lifecycle, exit codes, scheduling</td><td><a href="../lessons/0004-running-jobs.html">4</a></td></tr>
+  <tr><td>5</td><td><a href="running-many-jobs.html">Running many jobs</a></td><td>Fan-out, vCPU quota, Spot with retries, idempotent results</td><td><a href="../lessons/0005-running-many-jobs.html">5</a></td></tr>
+  <tr><td>6</td><td><a href="service-deployments.html">Service deployments</a></td><td>Rolling 100/200, grace period, deregistration delay, circuit breaker, alarms</td><td><a href="../lessons/0006-deploying-a-service.html">6</a></td></tr>
+  <tr><td>7</td><td><a href="service-scaling.html">Service scaling</a></td><td>Target tracking, backlog per task, scale-in protection</td><td><a href="../lessons/0007-scaling-a-service.html">7</a></td></tr>
+  <tr><td>8</td><td><a href="images-and-secrets.html">Images and secrets</a></td><td>Tag vs digest, immutability, lifecycle trap, scanning, secret rotation</td><td><a href="../lessons/0008-images-and-secrets.html">8</a></td></tr>
+  <tr><td>9</td><td><a href="debugging-playbook.html">Debugging playbook</a></td><td>"Did my code run?", error text → cause, Container Insights, ECS Exec</td><td><a href="../lessons/0009-debugging-and-observability.html">9</a></td></tr>
+  <tr><td>10</td><td><a href="compute-and-cost.html">Compute and cost</a></td><td>Fargate / Spot / Managed Instances / EC2, ARM64, Express Mode, cost maths</td><td><a href="../lessons/0010-choosing-compute-and-cost.html">10</a></td></tr>
+  <tr><td>11</td><td><a href="design-review-checklist.html">Design review checklist</a></td><td>8 questions for any ECS app; role vs security group vs both</td><td><a href="../lessons/0011-capstone-agent-assistant.html">11</a></td></tr>
+  <tr><td>12</td><td><a href="cdk-for-ecs.html">CDK for ECS</a></td><td>Design decision → the CDK line that carries it</td><td><a href="../lessons/0012-infrastructure-as-code-first-look.html">12</a></td></tr>
+</table></div>
+
+<p><strong>Also:</strong> the <a href="../GLOSSARY.md">glossary</a> (every term, in the exact words the lessons use), and the "Your questions" cards at the end of each lesson, which hold your own questions and answers.</p>
+<p class="muted">Printing: each sheet is laid out to print cleanly (Ctrl+P) if you prefer paper.</p>
+</main>
+</body>
+</html>

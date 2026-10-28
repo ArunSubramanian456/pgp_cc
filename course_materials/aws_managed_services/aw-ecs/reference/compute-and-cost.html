@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compute and Cost</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0010-choosing-compute-and-cost.html">From lesson 10</a> · <a href="debugging-playbook.html">Debugging playbook</a> · <a href="running-many-jobs.html">Running many jobs</a> · <a href="task-definition-fields.html">Task definition fields</a></nav>
+<h1>Compute and cost</h1>
+<p class="subtitle">Where tasks run, and what it roughly costs.</p>
+
+<h2>Options</h2>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Servers run by</th><th>Pay for</th><th>Limits / notes</th></tr>
+  <tr><td>Fargate</td><td>AWS (none visible)</td><td>Task vCPU + GB per second, 1-min min, from image pull to stop</td><td>No GPU; ≤ 32 vCPU / 244 GB; no privileged; per-task isolation</td></tr>
+  <tr><td>Fargate Spot</td><td>AWS, spare capacity</td><td>Up to 70% off</td><td>2-min warning + SIGTERM; Linux x86/ARM</td></tr>
+  <tr><td>Managed Instances</td><td>AWS, EC2 in your account</td><td>EC2 price + management fee (RIs, Savings Plans, Spot apply to EC2 part)</td><td>GPUs, big sizes, privileged, chosen instance types; tasks share instances; can scale to zero</td></tr>
+  <tr><td>EC2 launch type</td><td>You (ASG, AMIs, patching)</td><td>EC2 instances</td><td>Only for full host control (custom AMIs etc.)</td></tr>
+</table></div>
+<p><a href="https://docs.aws.amazon.com/batch/latest/userguide/when-to-use-ecs-managed-instances.html">When to use Managed Instances</a> · <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-cluster-best-practice.html">ECS cluster capacity</a></p>
+
+<h2>Decision order</h2>
+<pre><code>GPU / >32 vCPU / >244 GB / privileged / specific type?  → Managed Instances (EC2 type for full control)
+otherwise                                              → Fargate
+interruptible + retry-safe?                            → Fargate Spot (with a FARGATE base)
+native libs all have ARM builds?                       → ARM64 (~20% off)
+HTTP service receiving traffic?                        → Express Mode to set it up
+steady 1-3 yr usage?                                   → Compute Savings Plan (up to 50% off)</code></pre>
+
+<h2>Settings</h2>
+<pre><code>"runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "ARM64" }
+
+"capacityProviderStrategy": [
+  { "capacityProvider": "FARGATE",      "base": 2, "weight": 1 },
+  { "capacityProvider": "FARGATE_SPOT", "weight": 3 } ]</code></pre>
+<p><strong>Images and architecture:</strong> distro comes from the base image (host shares only the kernel); CPU architecture is baked in (build machine's by default). amd64 image on ARM64 task → <code>exec format error</code>, "Essential container in task exited", exit 1. No <code>runtimePlatform</code> → x86. Multi-arch: <code>docker buildx build --platform linux/amd64,linux/arm64 -t REPO:TAG --push .</code> (image index; each task pulls its match). Inspect: <code>docker buildx imagetools inspect REPO:TAG</code>. <a href="https://repost.aws/knowledge-center/ecs-task-exec-format-error">re:Post</a></p>
+<p><code>base</code> = first N tasks on that provider; <code>weight</code> = split of the rest (here 1 : 3).</p>
+
+<h2>Express Mode</h2>
+<p>Inputs: image, task execution role, infrastructure role. Creates on Fargate: task definition, service (canary deployments), ALB with HTTPS + ACM cert, security groups, target tracking auto scaling, log group, deployment alarms. Ordinary, editable resources; ≤ 25 services can share one ALB. For web services only, not jobs or queue workers. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-work.html">docs</a></p>
+
+<h2>Fargate arithmetic (us-east-1 Linux, rounded, Oct 2026)</h2>
+<pre><code>             per vCPU-hour   per GB-hour
+x86          $0.0405         $0.0044
+ARM64        $0.0324         $0.0036
+
+monthly ≈ tasks × hours × (vCPU × vCPU price + GB × GB price)     always-on = 720 h
+
+2 × (1 vCPU, 2 GB) always-on, x86   ≈ $71     ARM ≈ $57
+8 vCPU / 32 GB, 1.5 h × 30 nights    ≈ $21     same, always-on ≈ $335</code></pre>
+<p>Not included: ALB, NAT gateway, public IPv4, CloudWatch Logs, data transfer, extra ephemeral storage above 20 GB. Check the <a href="https://aws.amazon.com/fargate/pricing/">pricing page</a> for your Region.</p>
+</main>
+</body>
+</html>

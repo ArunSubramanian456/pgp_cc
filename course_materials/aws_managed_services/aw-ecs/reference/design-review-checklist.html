@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECS Design Review</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0011-capstone-agent-assistant.html">From lesson 11</a> · <a href="ecs-building-blocks.html">Building blocks</a> · <a href="fargate-networking.html">Networking</a> · <a href="service-deployments.html">Deployments</a> · <a href="service-scaling.html">Scaling</a> · <a href="images-and-secrets.html">Images</a> · <a href="debugging-playbook.html">Debugging</a> · <a href="compute-and-cost.html">Compute</a></nav>
+<h1>ECS design review checklist</h1>
+<p class="subtitle">Eight questions to ask of any app before it goes on ECS.</p>
+
+<div class="grid">
+<div class="card"><h3>1 · Shape</h3>
+<ul>
+  <li>Always on → service. Runs and exits → standalone/scheduled task. Queue of work → worker service.</li>
+  <li>One business purpose per task definition; sidecars only for true 1:1 helpers.</li>
+  <li>Different trust level → different task definition (own roles, own network).</li>
+</ul></div>
+
+<div class="card"><h3>2 · Networking</h3>
+<ul>
+  <li>Public ALB, private tasks, no public IPs.</li>
+  <li>Security groups chained by group ID, not CIDR.</li>
+  <li>Every outbound call has a route: NAT (internet) or VPC endpoints (AWS services).</li>
+  <li>Timeouts line up (ALB idle 60 s default vs slowest request).</li>
+</ul></div>
+
+<div class="card"><h3>3 · Roles and secrets</h3>
+<ul>
+  <li>Execution role: pull, logs, secrets. Task role: what the code calls, least privilege.</li>
+  <li>AWS APIs via task role, never keys. Other keys in Secrets Manager via <code>secrets</code>.</li>
+  <li>Rotation plan: new deployment or read at runtime.</li>
+</ul></div>
+
+<div class="card"><h3>4 · Deployments</h3>
+<ul>
+  <li>Rolling 100/200 (or canary/linear/blue-green with reason).</li>
+  <li>Grace period ≥ startup; deregistration delay ≥ longest request; SIGTERM handled.</li>
+  <li>Circuit breaker with rollback + alarm for "healthy but wrong".</li>
+</ul></div>
+
+<div class="card"><h3>5 · Scaling and quotas</h3>
+<ul>
+  <li>Metric that rises with load (CPU, requests per target, backlog per task).</li>
+  <li>Min for availability, max for cost; scheduled scaling for known peaks.</li>
+  <li>Max × task vCPU (plus jobs) fits the Fargate vCPU quota.</li>
+</ul></div>
+
+<div class="card"><h3>6 · Images</h3>
+<ul>
+  <li>Repo per image; immutable unique tags; never deploy <code>latest</code>.</li>
+  <li>Lifecycle rules can't reach deployed images.</li>
+  <li>Scanning matches the risk (enhanced for language packages).</li>
+  <li>Built for the task's CPU architecture.</li>
+</ul></div>
+
+<div class="card"><h3>7 · Observability</h3>
+<ul>
+  <li>awslogs with retention; a request/job ID in every log line; no secrets in logs.</li>
+  <li>Container Insights; event capture for stopped-task history.</li>
+  <li>ECS Exec only where justified.</li>
+</ul></div>
+
+<div class="card"><h3>8 · Compute and cost</h3>
+<ul>
+  <li>Fargate unless GPU / &gt;32 vCPU / privileged → Managed Instances.</li>
+  <li>Spot only for interruptible, retry-safe work; ARM64 if libraries allow.</li>
+  <li>Estimate tasks × hours × (vCPU + GB) and add ALB, NAT, endpoints, logs.</li>
+</ul></div>
+<div class="card"><h3>Role, security group, or both?</h3>
+<ul>
+  <li><strong>Network</strong> (route + SGs on both ends): every connection. Fails as a timeout.</li>
+  <li><strong>IAM</strong>: only calls to AWS service APIs. Fails as AccessDenied.</li>
+  <li>AWS API call → both. ECS doing it (pull, logs, secrets) → execution role; your code → task role.</li>
+  <li>Not AWS (Postgres, third-party APIs, service-to-service HTTP) → network + the app's own login.</li>
+</ul></div>
+</div>
+</main>
+</body>
+</html>

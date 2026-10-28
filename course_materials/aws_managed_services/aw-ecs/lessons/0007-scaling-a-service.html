@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scaling a Service</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0006-deploying-a-service.html">← Lesson 6</a> · Lesson 7 · <a href="../reference/service-scaling.html">Cheat sheet</a></nav>
+
+<h1>Scaling a service</h1>
+<p class="subtitle">More tasks when work piles up, fewer when it doesn't, and no solve lost along the way</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  You can choose the right scaling metric for a web API and for a queue worker, work out roughly how many tasks ECS will run, and explain how a worker avoids losing a half-finished MILP solve when the service scales in.
+</div>
+
+<h2>Warm-up</h2>
+<p>From lessons 2 to 6. Answer from memory before you click. Read each question carefully: one word can change the answer.</p>
+<div class="quiz" data-quiz="q-warmup7"></div>
+<script type="application/json" id="q-warmup7">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "desiredCount 3, minimumHealthyPercent 100, maximumPercent 200. What's the most tasks running or pending during a deployment?",
+      "options": ["6", "3", "5", "9"], "answer": 0,
+      "why": "200% of 3 = 6. ECS can start all 3 new tasks before stopping any old ones." },
+    { "q": "Queue workers call sqs:ReceiveMessage and sqs:DeleteMessage from their Python code. Which role needs those permissions?",
+      "options": ["The task role", "The execution role", "The scheduler role", "The service-linked role"], "answer": 0,
+      "why": "Your code makes the calls, so it uses the task role. The execution role is for what ECS does before your code runs." },
+    { "q": "A task gets SIGTERM. What decides how long it has before SIGKILL?",
+      "options": ["The container's own stopTimeout value", "The target group deregistration delay", "The health check grace period", "The service's minimum healthy percent"], "answer": 0,
+      "why": "stopTimeout is the gap between SIGTERM and SIGKILL (lesson 2). The deregistration delay happens before SIGTERM, while the task drains."},
+    { "q": "Worker tasks run in private subnets with no NAT gateway. What lets them reach SQS?",
+      "options": ["An interface VPC endpoint for SQS", "A public IP on every task", "An inbound rule for SQS traffic", "A larger task size and memory"], "answer": 0,
+      "why": "Workers start the connection, so inbound rules don't matter. Without NAT, a VPC endpoint is the private route (lesson 3). A public IP only helps in a public subnet." },
+    { "q": "forecast-api:9 passes every health check, but 20% of requests return 500. Which safety net catches it?",
+      "options": ["A CloudWatch alarm with rollback", "The deployment circuit breaker setting", "The health check grace period", "The target group deregistration delay"], "answer": 0,
+      "why": "Healthy is not the same as correct. The circuit breaker only sees starting and health checks; an alarm on 5xx errors sees the wrong answers (lesson 6)." }
+  ]
+}
+</script>
+
+<h2>1 · What scaling actually changes</h2>
+<p>Every service has a <code>desiredCount</code>. Service Auto Scaling does one thing: it moves that number up and down between a <strong>minimum</strong> and a <strong>maximum</strong> that you set. The service then does what it always does (lesson 1): it starts or stops tasks until the running count matches.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">[1]</a></sup></p>
+<pre><code>a metric (CPU, requests, queue backlog)
+   → crosses the target            (alarms that auto scaling creates and manages for you)
+   → desiredCount changes          (never below min, never above max)
+   → the service starts or stops tasks</code></pre>
+<p>Behind the scenes, ECS uses a separate service called Application Auto Scaling. Treat it as a black box: you give it a range and a policy, and it sets <code>desiredCount</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">[1]</a></sup> There are three kinds of policy:</p>
+<div class="table-wrap"><table>
+  <tr><th>Policy</th><th>You say</th><th>Use it for</th></tr>
+  <tr><td><strong>Target tracking</strong></td><td>"Keep this metric near this value"</td><td>The default choice. Most services, including queue workers<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup></td></tr>
+  <tr><td>Step scaling</td><td>"When the alarm is this far past the line, add this many"</td><td>When you want full control over step sizes and how fast it reacts</td></tr>
+  <tr><td>Scheduled</td><td>"At 07:00 on Mondays, set min to 6"</td><td>Known peaks, like planners opening the weekly forecast on Monday morning<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/scale-your-amazon-ecs-using-different-aws-native-services/">[3]</a></sup></td></tr>
+</table></div>
+<p>This lesson focuses on target tracking.</p>
+
+<h2>2 · The forecast API: target tracking on CPU</h2>
+<p>The forecast API from lesson 6 runs model inference on CPU. When requests rise, CPU rises, so average CPU is a good signal. Say what each highlighted part does, then click to check.</p>
+
+<div class="anno">
+<pre><code><span class="a" data-k="range">aws application-autoscaling register-scalable-target \
+  --service-namespace ecs --scalable-dimension ecs:service:DesiredCount \
+  --resource-id service/forecasting/forecast-api \
+  --min-capacity 2 --max-capacity 10</span>
+
+{
+  <span class="a" data-k="metric">"PredefinedMetricSpecification": { "PredefinedMetricType": "ECSServiceAverageCPUUtilization" },</span>
+  <span class="a" data-k="target">"TargetValue": 60.0,</span>
+  <span class="a" data-k="cool">"ScaleOutCooldown": 60,
+  "ScaleInCooldown": 300</span>
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="range"><b>The scalable target</b>: the range auto scaling may move <code>desiredCount</code> in, here 2 to 10.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-fargate-service-auto-scaling">[5]</a></sup> The minimum of 2 is the forecast API's availability floor: one task can fail or be replaced while the other keeps serving. The maximum is your cost ceiling, and it also has to fit your Fargate vCPU quota (lesson 5).</div>
+  <div data-k="metric"><b>The metric</b>: average CPU across the service's tasks. The other two built-in choices are <code>ECSServiceAverageMemoryUtilization</code> and <code>ALBRequestCountPerTarget</code> (requests per task per minute, from the load balancer).<sup class="cite"><a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-application-auto-scaling.html">[6]</a></sup> Pick the one that actually rises when the app gets busy.</div>
+  <div data-k="target"><b><code>TargetValue</code></b>: keep average CPU near 60%. Why not 90%? New tasks need about 90 seconds to pull the image and load the model before they help. The gap between 60% and 100% is the room the running tasks have to absorb a spike in the meantime.</div>
+  <div data-k="cool"><b>Cooldowns</b> (seconds): how long to wait after scaling before scaling again in the same direction, so new tasks have time to start and show up in the metric. Short for scaling out, long for scaling in: adding tasks fast protects users, and removing them slowly avoids flapping up and down.</div>
+</div>
+</div>
+
+<h3>How many tasks? Roughly proportional</h3>
+<p>Target tracking scales <strong>in proportion to the metric</strong>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup> A useful rule of thumb:</p>
+<pre><code>new desiredCount ≈ current tasks × (current metric ÷ target)</code></pre>
+<p>It's approximate, because ECS rounds cautiously: up when adding, so it never adds too little, and carefully when removing.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup></p>
+
+<h3>Five behaviours worth knowing</h3>
+<ul>
+  <li><strong>Out fast, in slowly.</strong> It scales out as fast as it can and scales in gradually.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup></li>
+  <li><strong>No data, no action.</strong> If the metric has no data, nothing happens. Missing data is not treated as "low", so it never scales in because of it.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup></li>
+  <li><strong>Several policies: out if any, in only if all.</strong> You can have, say, a CPU policy and a requests policy. It scales out if <em>any</em> of them wants to, and scales in only when <em>all</em> of them agree.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup></li>
+  <li><strong>Deployments pause scale-in.</strong> While a deployment (lesson 6) is in progress, scale-in is turned off. Scale-out keeps working.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">[1]</a></sup></li>
+  <li><strong>Hands off its alarms.</strong> Don't edit or delete the CloudWatch alarms a target tracking policy creates. Deleting the policy removes them.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[2]</a></sup></li>
+</ul>
+
+<div class="callout">
+  <strong>CPU isn't always the right signal</strong>
+  The agentic data-exploration assistant spends most of each request waiting for an LLM to reply. Its CPU sits near 5% even when users are queuing up, so a CPU policy would never scale it out. Requests per task (<code>ALBRequestCountPerTarget</code>) does rise with load, so that's the one to track. Always ask: "which number actually goes up when this app is busy?"
+</div>
+
+<h2>3 · The solve-on-demand worker: scaling on a queue</h2>
+<p>New app. Supply chain planners click "re-optimise" in a dashboard, and each click puts a MILP solve job on an SQS queue. A <strong>worker service</strong> (no load balancer) pulls jobs, solves them and writes the result to S3. A solve takes about 30 seconds. Planners are happy to wait up to 10 minutes.</p>
+
+<p><strong>Why not scale on queue depth directly?</strong> The number of messages waiting tells you there's work, but it doesn't change in proportion to the number of tasks working on it. A target tracking policy on raw depth reads a big queue as a demand for proportionally more tasks, and can scale far beyond what you need.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup> CPU doesn't help either: a busy worker sits near 100% CPU whether 5 or 5,000 jobs are waiting.</p>
+
+<p><strong>Track the backlog per task instead.</strong><sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup></p>
+<pre><code>backlog per task = messages visible in the queue ÷ running tasks
+target value     = acceptable wait ÷ time to process one message</code></pre>
+<p>For the solve worker: 600 s acceptable wait ÷ 30 s per solve = a target of <strong>20 jobs per task</strong>. A task with 20 jobs ahead of it finishes the last one in about 10 minutes. AWS's own example is the same arithmetic: 10 s ÷ 0.1 s = 100 messages per task.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/amazon-elastic-container-service-ecs-auto-scaling-using-custom-metrics/">[7]</a></sup></p>
+
+<p>You don't write code to calculate it. The policy divides one metric by the other itself (CloudWatch "metric math"), using two numbers:<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup></p>
+<ul>
+  <li><code>ApproximateNumberOfMessagesVisible</code> from SQS: the jobs waiting.</li>
+  <li><code>RunningTaskCount</code> from ECS: the tasks running. <strong>This one only exists if Container Insights is turned on for the cluster.</strong> Without it, the division has no data, and (as in section 2) no data means no scaling at all.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup></li>
+</ul>
+<p class="muted">Keep the worker's minimum at 1 or more for this policy: with zero tasks, "jobs ÷ running tasks" has nothing to divide by. Scaling a worker to zero when the queue is empty is possible, but needs a different setup (ask me if you want it).</p>
+
+<div class="num" data-num="n-scale"></div>
+<script type="application/json" id="n-scale">
+{
+  "title": "Work out the task count",
+  "intro": "Use the rule of thumb: new count ≈ current tasks × (metric ÷ target). Type a number and press Enter.",
+  "questions": [
+    { "q": "The forecast API runs 4 tasks at 90% average CPU. The target is 60%. About how many tasks will it scale to?",
+      "answer": 6, "unit": "tasks",
+      "why": "4 × (90 ÷ 60) = 6. That brings the load per task back to about 60%." },
+    { "q": "A what-if LP worker takes 45 seconds per scenario, and users accept up to 15 minutes of waiting. What target backlog per task should you set?",
+      "answer": 20, "unit": "messages per task",
+      "why": "900 s ÷ 45 s = 20. With 20 jobs ahead of it, a task finishes the last one in about 15 minutes." },
+    { "q": "The solve queue holds 400 visible messages. 5 worker tasks are running, and the target is 20 per task. About how many tasks will it scale to?",
+      "answer": 20, "unit": "tasks",
+      "why": "Backlog per task = 400 ÷ 5 = 80. That's 4× the target of 20, so 5 × 4 = 20 tasks. Each then has 20 jobs ahead of it." },
+    { "q": "Same worker: max capacity 20, each task is 2 vCPU, and the account still has the new-account Fargate quota of 6 vCPU. How many tasks can actually run?",
+      "answer": 3, "unit": "tasks",
+      "why": "6 vCPU ÷ 2 = 3. Auto scaling can set desiredCount to 20, but Fargate won't run more than the quota allows (lesson 5). Raise the quota to match your max capacity before you need it." }
+  ]
+}
+</script>
+
+<h2>4 · Scaling in without losing a solve</h2>
+<p>When the queue drains, auto scaling lowers <code>desiredCount</code>, and ECS stops some workers. You know the stop sequence from lessons 2 and 4: SIGTERM, then SIGKILL after <code>stopTimeout</code> (at most 120 seconds on Fargate). Now suppose that worker is 20 seconds into a 30-second solve. What happens to the job?</p>
+<p>The worker never deleted the message, so it isn't lost. Once its <strong>visibility timeout</strong> runs out, SQS makes it visible again and another worker picks it up.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">[4]</a></sup> That's safe, but wasteful, and it only works if you get three things right:</p>
+
+<div class="table-wrap"><table>
+  <tr><th>Get this right</th><th>Why</th></tr>
+  <tr><td><strong>Visibility timeout ≥ your longest solve</strong></td><td>The default is 30 seconds.<sup class="cite"><a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html">[8]</a></sup> If a solve takes 4 minutes, the message reappears after 30 s while the first worker is still solving, and a second worker starts the same job.</td></tr>
+  <tr><td><strong>Idempotent results</strong></td><td>A message can be handled twice, so write the result under a key that depends only on the job, e.g. <code>results/{job_id}.json</code>. A second run overwrites it with the same answer. Same idea as the Scenario Lab keys in lesson 5.</td></tr>
+  <tr><td><strong>Task scale-in protection</strong></td><td>Stops ECS from choosing a busy worker when it scales in. See below.</td></tr>
+</table></div>
+
+<h3>Task scale-in protection</h3>
+<p>This is an ECS feature. A worker can mark <em>its own task</em> as protected while it works on a job. A protected task isn't stopped by auto scaling scale-in <em>or</em> by deployments.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-scale-in-protection-endpoint.html">[9]</a></sup> ECS gives every container an environment variable, <code>ECS_AGENT_URI</code>, and the worker calls an endpoint under it. The worker loop:</p>
+
+<div class="anno">
+<pre><code>while not shutting_down:
+    msg = queue.receive()                       <span class="a" data-k="recv"># invisible to other workers now</span>
+    <span class="a" data-k="on">PUT $ECS_AGENT_URI/task-protection/v1/state  {"ProtectionEnabled": true, "ExpiresInMinutes": 15}</span>
+    result = solve_milp(msg.body)
+    <span class="a" data-k="write">s3.put(f"results/{msg.job_id}.json", result)</span>
+    queue.delete(msg)
+    <span class="a" data-k="off">PUT $ECS_AGENT_URI/task-protection/v1/state  {"ProtectionEnabled": false}</span></code></pre>
+<div class="anno-notes">
+  <div data-k="recv"><b>Receive</b>: SQS hides the message from other workers for the visibility timeout. Set that longer than the slowest solve.</div>
+  <div data-k="on"><b>Protect</b>: from now on, scale-in and deployments leave this task alone. <code>ExpiresInMinutes</code> can be 1 to 2,880 (48 hours). If you leave it out, protection lasts <strong>120 minutes</strong>, then switches itself off.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-scale-in-protection-endpoint.html">[9]</a></sup> That expiry is your safety net: a worker stuck on a solve that never finishes can't block scale-in forever. Pick a value a bit above your slowest solve.</div>
+  <div data-k="write"><b>Write the result</b> under a key that depends only on the job, so a repeat run is harmless.</div>
+  <div data-k="off"><b>Unprotect</b>: the task can be stopped again, so the next scale-in can choose it while it's idle between messages. Recommended by AWS for queue workers: the task protects itself through this endpoint.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/announcing-amazon-ecs-task-scale-in-protection/">[10]</a></sup></div>
+</div>
+</div>
+
+<p>Two limits to remember:</p>
+<ul>
+  <li><strong>Services only.</strong> It works only for tasks that belong to a service. For a standalone task (like the nightly planner from lesson 4), the call fails with <code>TASK_NOT_VALID</code>. A standalone task has no scale-in to be protected from anyway.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateTaskProtection.html">[11]</a></sup></li>
+  <li><strong>Scale-in and deployments only.</strong> It doesn't stop a Fargate Spot interruption or a crash. That's why the visibility timeout and idempotent results still matter.</li>
+</ul>
+<p class="muted">Also handle SIGTERM: when the worker gets it, stop taking new messages and finish (or abandon) the current one within <code>stopTimeout</code>. An abandoned message simply reappears after its visibility timeout.</p>
+
+<div class="seq" data-seq="s-scalein"></div>
+<script type="application/json" id="s-scalein">
+{
+  "title": "One job through a scale-in",
+  "intro": "The queue is draining, and auto scaling is about to remove a worker while this one is mid-solve. Click the steps in the order they happen.",
+  "steps": [
+    "The worker receives a job; SQS hides it from other workers",
+    "The worker turns on scale-in protection through the agent endpoint",
+    "While the solve runs, backlog per task falls and auto scaling lowers desiredCount",
+    "ECS stops a different, unprotected task instead of this one",
+    "The worker writes results/{job_id}.json to S3",
+    "The worker deletes the message from the queue",
+    "The worker turns protection off and can now be stopped"
+  ],
+  "why": "Protection goes on before the work starts and comes off only after the result is saved and the message is deleted. In between, scale-in picks someone else."
+}
+</script>
+
+<h2>Practice</h2>
+<div class="quiz" data-quiz="q-scale"></div>
+<script type="application/json" id="q-scale">
+{
+  "title": "Choose and predict the scaling",
+  "shuffle": true,
+  "questions": [
+    { "q": "The agentic assistant mostly waits on LLM replies. CPU stays near 5% even when users queue up. Which metric should it track?",
+      "options": ["ALBRequestCountPerTarget", "ECSServiceAverageCPUUtilization", "ECSServiceAverageMemoryUtilization", "ApproximateNumberOfMessagesVisible"], "answer": 0,
+      "why": "Pick the number that rises when the app is busy. CPU barely moves here, but requests per task do. There's no queue in front of this service." },
+    { "q": "Why does AWS advise against target tracking on raw queue depth for the solve workers?",
+      "options": ["Depth ignores how many tasks are working", "SQS publishes queue depth only once hourly", "Target tracking cannot read any SQS metrics", "Queue depth is always zero on Fargate"], "answer": 0,
+      "why": "Depth doesn't change in proportion to the task count, so tracking it can scale far past what's needed. Backlog per task divides by the running tasks." },
+    { "q": "The solve queue keeps the default visibility timeout. Solves take about 4 minutes. What goes wrong?",
+      "options": ["Other workers pick up the same job", "SQS deletes the message after thirty seconds", "ECS stops the task after thirty seconds", "The message waits until the solve finishes"], "answer": 0,
+      "why": "The default is 30 seconds. After that, the message is visible again while the first worker is still solving, so a second worker starts the same job. Set it above your longest solve." },
+    { "q": "A backlog-per-task policy is set up, but Container Insights is off for the cluster. The queue grows to 2,000. What happens?",
+      "options": ["Nothing scales: the divisor metric has no data", "It falls back to scaling on queue depth", "It scales out to the maximum task count", "ECS turns Container Insights on for you automatically"], "answer": 0,
+      "why": "RunningTaskCount only exists with Container Insights. No data means no scaling, in either direction." },
+    { "q": "Forecast traffic drops sharply while forecast-api:9 is being deployed. What happens to the task count?",
+      "options": ["Stays high until the deployment completes", "Drops straight away to the minimum", "The deployment pauses while it scales", "Scale-in happens, and the deployment fails"], "answer": 0,
+      "why": "Scale-in is turned off during deployments and resumes once the deployment completes. Scale-out still works during a deployment." },
+    { "q": "The forecast API has a CPU policy and a requests policy. CPU wants to scale out; requests wants to scale in. What happens?",
+      "options": ["It scales out", "It scales in", "It does nothing", "They cancel out"], "answer": 0,
+      "why": "Availability first: it scales out if any policy wants to, and scales in only when all of them agree." },
+    { "q": "A worker turns on scale-in protection without ExpiresInMinutes, then its solver hangs forever. What happens?",
+      "options": ["Protection expires after two hours by default", "The task stays protected forever from scale-in", "ECS kills the task after forty minutes", "SQS removes the protection when visibility ends"], "answer": 0,
+      "why": "Without ExpiresInMinutes, protection lasts 120 minutes and then switches off, so the task can be chosen by a later scale-in." },
+    { "q": "The nightly MILP planner is a standalone task started by RunTask. Its code calls the scale-in protection endpoint. What happens?",
+      "options": ["It fails: protection is for service tasks", "It protects the task from Spot interruptions", "It stops EventBridge Scheduler from retrying it", "It works just like a service task"], "answer": 0,
+      "why": "Scale-in protection only applies to tasks in a service (standalone tasks get TASK_NOT_VALID). It never protects against Spot interruptions, even in a service." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>What does <code>register-scalable-target</code> do? Is it only for auto scaling, and does it work for EC2, ECS, EKS?</summary>
+<p>It belongs to <strong>Application Auto Scaling</strong>, a separate AWS service (CLI: <code>aws application-autoscaling</code>), not to ECS. It tells that service: "this number on this resource may be scaled, within this range." On its own it scales nothing. Nothing moves until you also attach a policy (<code>put-scaling-policy</code>) or a scheduled action.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-fargate-service-auto-scaling">[5]</a></sup></p>
+<pre><code>--service-namespace ecs                      which AWS service owns the resource
+--scalable-dimension ecs:service:DesiredCount which number on it to change
+--resource-id service/forecasting/forecast-api service/&lt;cluster&gt;/&lt;service&gt;
+--min-capacity 2 --max-capacity 10            the range policies may move it in</code></pre>
+<p>Running it again on the same target updates the range. The same command can also pause scaling, which is how you'd stop scale-out during a deployment (section 2).<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">[1]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>Resource</th><th>Scaled by</th></tr>
+  <tr><td>ECS services (Fargate or EC2)</td><td>This command, namespace <code>ecs</code></td></tr>
+  <tr><td>SageMaker endpoints, Lambda provisioned concurrency, DynamoDB, Aurora replicas, ElastiCache, Spot Fleet and more</td><td>This same command, with a different namespace and dimension<sup class="cite"><a href="https://docs.aws.amazon.com/autoscaling/application/userguide/what-is-application-auto-scaling.html">[12]</a></sup></td></tr>
+  <tr><td>EC2 Auto Scaling groups</td><td><strong>Not this.</strong> A different service with its own CLI, <code>aws autoscaling</code>. Same ideas (min, max, desired, target tracking).</td></tr>
+  <tr><td>EKS</td><td><strong>Not this.</strong> Kubernetes scales its own pods and nodes (out of scope for this course).</td></tr>
+</table></div>
+<p><strong>Follow-up: is it a separate service in the console too?</strong> It's a real AWS service (its own API, CLI, SDK, IAM actions <code>application-autoscaling:*</code> and CloudFormation types <code>AWS::ApplicationAutoScaling::ScalableTarget</code> and <code>::ScalingPolicy</code>), but it has no console page of its own. In the console, you set it up inside the service you're scaling: for ECS, in the service's <em>Service auto scaling</em> settings. The console then makes the Application Auto Scaling calls for you.<sup class="cite"><a href="https://docs.aws.amazon.com/autoscaling/application/userguide/integrated-services-list.html">[13]</a></sup> The alarms that target tracking creates show up in the CloudWatch console.</p>
+<p><strong>Follow-up: so where does it fit among task definition, cluster, service and task?</strong> It attaches to the <strong>service</strong> only, and comes <em>after</em> the service exists:</p>
+<pre><code>task definition   the recipe: knows nothing about how many copies     no scaling here
+cluster           a grouping: holds services and tasks                 no scaling here
+standalone task   no desiredCount, nothing to keep at a number         no scaling here
+service           has desiredCount                                     ← scaling attaches here
+  then: register-scalable-target service/&lt;cluster&gt;/&lt;service&gt;  +  put-scaling-policy</code></pre>
+<p>The console shows it as an optional section when you create or update a service, which makes it look like a service setting. The ECS API's <code>CreateService</code> has no scaling fields, though. It's always a separate step that points at the service. Once it's on, auto scaling sets <code>desiredCount</code>: if you change the count by hand, its next decision can change it back.</p>
+<p class="muted">On Fargate, scaling the service is all you do: there are no servers to scale. With ECS on EC2 you'd also need the instances to grow, which is lesson 10's topic.</p>
+</details>
+
+<details class="qa">
+<summary>Is a "worker service" a separate option in ECS?</summary>
+<p><strong>No.</strong> It's an ordinary ECS service: same task definition format, same <code>CreateService</code> call. "Worker" describes what the code does (pull jobs from a queue), not an ECS setting. What makes it a worker is what you <em>leave out</em> and what you add:</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Web service (forecast API)</th><th>Worker service (solve worker)</th></tr>
+  <tr><td>Port mappings</td><td>Yes (8000)</td><td>None: nothing connects to it</td></tr>
+  <tr><td><code>loadBalancers</code></td><td>Target group</td><td>None</td></tr>
+  <tr><td>Health check</td><td>ALB target group check</td><td>Container <code>healthCheck</code> only</td></tr>
+  <tr><td>Security group inbound</td><td>From the ALB</td><td>None</td></tr>
+  <tr><td>Scales on</td><td>CPU or requests per task</td><td>Backlog per task</td></tr>
+  <tr><td>Code</td><td>Answers HTTP requests</td><td>Loops: receive → protect → work → write → delete → unprotect</td></tr>
+</table></div>
+<pre><code>// task definition (excerpt)
+"containerDefinitions": [{
+  "name": "worker", "image": "…/solve-worker:2026-10-25-a1b2c3d", "essential": true,
+  "environment": [{ "name": "QUEUE_URL", "value": "https://sqs.eu-west-2.amazonaws.com/…/solve-jobs" }],
+  "healthCheck": { "command": ["CMD-SHELL", "find /tmp/heartbeat -mmin -5 | grep -q . || exit 1"],
+                   "startPeriod": 60 },
+  "stopTimeout": 120
+}]
+// no portMappings: nothing ever connects in
+
+// service: the same create-service as any other, just without a load balancer
+aws ecs create-service --cluster planning --service-name solve-worker \
+  --task-definition solve-worker:4 --desired-count 2 \
+  --capacity-provider-strategy capacityProvider=FARGATE,base=1,weight=1 capacityProvider=FARGATE_SPOT,weight=3 \
+  --network-configuration "awsvpcConfiguration={subnets=[private-a,private-b],securityGroups=[sg-worker],assignPublicIp=DISABLED}"</code></pre>
+<p><strong>Follow-up: where does SQS live?</strong> Outside ECS and outside your VPC. SQS is its own fully managed AWS service; you create the queue separately (console, CLI or the same CDK stack). ECS doesn't know the queue exists. Your <em>code</em> talks to it through the SDK:</p>
+<pre><code>API task  ──SendMessage──▶  [ SQS queue: solve-jobs ]  ◀──ReceiveMessage / DeleteMessage──  worker tasks
+(task role: sqs:SendMessage)      AWS-managed,              (task role: sqs:ReceiveMessage, sqs:DeleteMessage)
+                                  outside your VPC
+          Application Auto Scaling reads the queue's CloudWatch metric → sets the worker service's desiredCount</code></pre>
+<ul>
+  <li><strong>Both gates apply</strong> (lesson 11): a network route to SQS from private subnets (NAT or an <code>sqs</code> interface endpoint) <em>and</em> the task role permissions.</li>
+  <li>The queue URL reaches the code as a plain <code>environment</code> value.</li>
+  <li>Queue settings belong to SQS, not ECS: visibility timeout (above the longest job), retention, and a dead-letter queue for messages that keep failing.</li>
+  <li>The only ECS-side link is scaling, which reads the queue's metric.</li>
+</ul>
+<p><strong>Follow-up: who puts jobs on the queue?</strong> Any code that calls <code>SendMessage</code>: the <em>producer</em>. For Scenario Lab, where planners request runs in a browser:</p>
+<pre><code>browser ─▶ ALB ─▶ frontend service (UI) ─Service Connect─▶ scenario-api service
+                                                             1. validate the request, create run_id
+                                                             2. write inputs to S3: runs/{run_id}/scenario-{n}.json
+                                                             3. SendMessage × N  {run_id, scenario_id}
+                                                             4. reply at once: {"run_id": "r-17"}
+                                        [ SQS: scenario-jobs ] ─▶ worker service (mostly Spot)
+                                                                    solve → results/{run_id}/{scenario_id}.json
+   browser polls GET /runs/r-17 ─▶ scenario-api counts results; when all N are in,
+                                   RunTask compare (standalone) → baseline vs scenarios report</code></pre>
+<ul>
+  <li><strong>Recommended producer: an API service</strong>, not the UI. One place validates input, assigns IDs and holds the <code>sqs:SendMessage</code> permission; the UI's task role needs nothing. It's the same pattern as the capstone.</li>
+  <li><strong>Simpler start:</strong> a small team can let a Streamlit frontend send to SQS directly (one service instead of two), then split out the API when it grows. A deliberate trade-off.</li>
+  <li><strong>Other producers:</strong> a scheduled task (nightly batches), or AWS events such as a file landing in S3. The worker doesn't care who sent the message.</li>
+</ul>
+<p><strong>Follow-up: where does the compare task get the results?</strong> From S3. Tasks never talk to each other directly; S3 is the hand-off point:</p>
+<pre><code>scenario-api  writes runs/{run_id}/manifest.json   ← list of expected scenario_ids + baseline id
+workers       write  results/{run_id}/{scenario_id}.json
+scenario-api  RunTask compare  with override RUN_ID=r-17
+compare task  1. read the manifest                       (what should exist)
+              2. read every results/{run_id}/*.json      (what does exist)
+              3. reconcile: list missing or failed scenarios (lesson 5)
+              4. compare each scenario with the baseline
+              5. write reports/{run_id}/report.json (+ charts), exit 0
+scenario-api  next poll finds the report → returns it to the browser</code></pre>
+<p>Its task role reads <code>runs/*</code> and <code>results/*</code> and writes <code>reports/*</code>. Nothing else.</p>
+<p><strong>Follow-up: if planners don't wait on the request, where does the answer go?</strong> Nowhere is "sent back" to the original request: the results <em>stay</em> in S3, and the planner fetches them. How they find out depends on how long a run takes:</p>
+<div class="table-wrap"><table>
+  <tr><th>Run takes</th><th>How the planner gets the result</th></tr>
+  <tr><td>Seconds to a few minutes</td><td>The page polls <code>GET /runs/{run_id}</code> every few seconds and shows progress ("31 / 48 solved"), then the report</td></tr>
+  <tr><td>Tens of minutes or more</td><td>They close the page. When the compare task finishes, a notification (SNS email, or a Teams/Slack message) links to the report</td></tr>
+  <tr><td>Always</td><td>A "My runs" page lists past runs and their status, so a closed tab never loses a result</td></tr>
+</table></div>
+<p>Status lives outside the tasks: counted from S3 (results vs manifest), or kept in a small runs table that workers update.</p>
+<p>The worker writes <code>/tmp/heartbeat</code> after each message, so the health check fails if the loop hangs for 5 minutes. Spot fits because messages that are interrupted mid-job reappear and results are idempotent. The task role gets <code>sqs:ReceiveMessage</code> and <code>sqs:DeleteMessage</code> on that one queue.</p>
+</details>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">Scale Amazon ECS services based on an Amazon SQS queue</a> (ECS Developer Guide). It's short, and covers backlog per task, the target formula, Container Insights and scale-in protection in one place. Then skim <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">Use a target metric to scale Amazon ECS services</a> for the target tracking rules.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "how do I scale a worker to zero when the queue is empty?", "when would I pick step scaling over target tracking?", "what's a good cooldown for a model that takes 3 minutes to load?" or "how does scale-in protection interact with a deployment?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> Lesson 8, images and secrets: ECR repositories, image tags that can't be overwritten (the "reused tag" trap from lesson 6), lifecycle cleanup, image scanning, and config vs secrets.</p>
+  <p>Cheat sheets: <a href="../reference/service-scaling.html">Service scaling</a> · <a href="../reference/service-deployments.html">Service deployments</a> · <a href="../reference/running-many-jobs.html">Running many jobs</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a></p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">ECS: automatically scale your service</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">ECS: target tracking</a> · [3] <a href="https://aws.amazon.com/blogs/containers/scale-your-amazon-ecs-using-different-aws-native-services/">AWS blog: scaling ECS with native services</a> · [4] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">ECS: scale on an SQS queue</a> · [5] <a href="https://repost.aws/knowledge-center/ecs-fargate-service-auto-scaling">re:Post: service auto scaling on Fargate</a> · [6] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-application-auto-scaling.html">Predefined metrics for ECS (CloudFormation examples)</a> · [7] <a href="https://aws.amazon.com/blogs/containers/amazon-elastic-container-service-ecs-auto-scaling-using-custom-metrics/">AWS blog: ECS auto scaling with custom metrics</a> · [8] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html">SQS: visibility timeout</a> · [9] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-scale-in-protection-endpoint.html">ECS: task scale-in protection endpoint</a> · [10] <a href="https://aws.amazon.com/blogs/containers/announcing-amazon-ecs-task-scale-in-protection/">AWS blog: announcing task scale-in protection</a> · [11] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateTaskProtection.html">ECS API: UpdateTaskProtection</a> · [12] <a href="https://docs.aws.amazon.com/autoscaling/application/userguide/what-is-application-auto-scaling.html">What is Application Auto Scaling?</a> · [13] <a href="https://docs.aws.amazon.com/autoscaling/application/userguide/integrated-services-list.html">Services you can use with Application Auto Scaling</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/sequence.js" defer></script>
+<script src="../assets/numeric.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

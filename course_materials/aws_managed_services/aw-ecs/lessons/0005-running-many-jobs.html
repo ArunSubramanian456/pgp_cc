@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Many Jobs</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="0004-running-jobs.html">← Lesson 4</a> · Lesson 5 · <a href="../reference/running-many-jobs.html">Cheat sheet</a></nav>
+
+<h1>Running many jobs</h1>
+<p class="subtitle">Scenario Lab: 200 what-if MILPs against a baseline, without blowing your quota or losing results</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 30 minutes)</strong>
+  You can pick the right shape for running many jobs (a RunTask loop, a Step Functions Map, or an SQS worker service), work out a safe concurrency from your Fargate vCPU quota, run the scenarios on Spot with retries that can't corrupt results, and collect everything into one baseline-vs-scenario comparison.
+</div>
+
+<h2>Warm-up</h2>
+<p>From lessons 2 to 4. Answer from memory before you click.</p>
+<div class="quiz" data-quiz="q-warmup5"></div>
+<script type="application/json" id="q-warmup5">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "A scenario's constraint changes are a 30 KB JSON. You want to pass them to the task as an environment override. What happens?",
+      "options": ["Rejected: exceeds the 8,192 limit", "Accepted: overrides have no limit", "Accepted: ECS compresses the value", "Rejected: values capped at 256"], "answer": 0,
+      "why": "All overrides together are capped at 8,192 characters. Put the JSON in S3 and pass only its key. This lesson builds on that pattern." },
+    { "q": "A scenario task stopped with exit code 143. What's the most likely story?",
+      "options": ["It got SIGTERM and stopped", "It exceeded its memory limit", "Your code raised an exception", "It finished its solve normally"], "answer": 0,
+      "why": "143 = stopped by SIGTERM. On Fargate Spot, that's what an interruption looks like. 137 would be SIGKILL (often out of memory)." },
+    { "q": "Your script calls RunTask, times out, and calls it again. What stops a duplicate task?",
+      "options": ["Reuse the same clientToken value", "Reuse the same startedBy tag", "Pin the task definition revision", "Set count parameter to one"], "answer": 0,
+      "why": "Same clientToken + same parameters within 24 hours returns the original task instead of starting a new one." },
+    { "q": "The baseline ran on scenario-solver:5 and half the scenarios ran on scenario-solver:6. What's the problem?",
+      "options": ["Deltas mix code and input changes", "ECS forbids mixing revisions at all", "Revision 6 can't read old data", "None: revisions only rename the tags"], "answer": 0,
+      "why": "A what-if should change one thing: the inputs. If the code or solver settings changed too, you can't tell which caused the difference. Pin one revision (and one image tag) for the whole run." },
+    { "q": "EventBridge Scheduler reports a successful 01:00 invocation. What do you actually know?",
+      "options": ["The RunTask call itself succeeded", "The plan file reached S3", "The task exited with zero", "The task reached RUNNING state"], "answer": 0,
+      "why": "The Scheduler's success is about delivering the call. Whether the job worked is a separate question, answered by the exit code and task state change events." }
+  ]
+}
+</script>
+
+<h2>1 · The job: one Scenario Lab run</h2>
+<p>A planner asks: <em>"What if the Dallas DC loses 20% capacity, lead times from Supplier B double, or we add a weekend shift?"</em> The Scenario Lab turns that into <strong>200 what-if MILPs</strong>, each a small change to tonight's baseline model. Every solve needs 4 vCPU / 16 GB and takes about 12 minutes. Afterwards, one comparison shows the planner how cost and service level move against the baseline.</p>
+<p>Two rules carry over from earlier lessons:</p>
+<ul>
+  <li><strong>One revision for the whole run.</strong> Baseline and all 200 scenarios use <code>scenario-solver:5</code>, so the only thing that differs is the input.</li>
+  <li><strong>Inputs live in S3, not in overrides.</strong> Each scenario's changes are a JSON file at <code>s3://scenario-lab/runs/&lt;run_id&gt;/scenarios/&lt;id&gt;.json</code>. The task only gets two short environment variables, <code>RUN_ID</code> and <code>SCENARIO_ID</code>, which stay far below the 8,192-character limit.</li>
+</ul>
+
+<h2>2 · Three shapes for "many jobs"</h2>
+<div class="table-wrap"><table>
+  <tr><th>Shape</th><th>How it works</th><th>Good for</th><th>Breaks down when</th></tr>
+  <tr><td><strong>A. RunTask loop</strong></td><td>A script calls RunTask once per scenario</td><td>A handful of jobs, a quick experiment</td><td>You need concurrency limits, retries, "tell me when all are done", or a record of what failed. You'd be writing all of that yourself.</td></tr>
+  <tr><td><strong>B. Step Functions Map</strong></td><td>A state machine loops over the scenario list, starts each task and waits for it to finish</td><td>A <em>batch with a known end</em>: "run these 200, then compare"</td><td>Work arrives all day in no fixed batch</td></tr>
+  <tr><td><strong>C. SQS + worker service</strong></td><td>The API puts one message per scenario on a queue. A service of long-running workers pulls and solves them.</td><td>A <em>steady stream</em> of ad-hoc requests from many planners</td><td>You need a single "everything finished" moment (you can build one, but it takes extra work)</td></tr>
+</table></div>
+
+<div class="callout">
+  <strong>Why <code>count=10</code> doesn't help here</strong>
+  RunTask can start up to 10 tasks in one call,<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup> but they are 10 <em>identical</em> copies with the same overrides. Ten different scenarios need ten different <code>SCENARIO_ID</code>s, which means ten separate calls (or a queue that hands each worker a different message).
+</div>
+
+<p>The Scenario Lab run is a batch with a clear end and a comparison step afterwards, so this lesson uses <strong>shape B</strong>. Shape C is the right fit for the interactive "submit a what-if any time" API. Lesson 6 covers it, along with scaling a service on queue depth.</p>
+
+<h2>3 · How many at once? Your quota decides</h2>
+<p>Fargate's main limit is the number of <strong>vCPUs running at the same time</strong> in an account and Region, with separate quotas for On-Demand and Spot. The default On-Demand quota for new accounts is <strong>6 vCPU</strong>. It's adjustable, and Fargate also raises it automatically as your usage grows.<sup class="cite"><a href="https://docs.aws.amazon.com/general/latest/gr/eks.html">[2]</a></sup><sup class="cite"><a href="https://aws.amazon.com/fargate/faqs/">[3]</a></sup> There's also a <em>launch rate</em> limit: Fargate's RunTask is limited to 20 calls per second.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/throttling.html">[4]</a></sup></p>
+
+<pre><code>max at once  =  ( vCPU quota  −  vCPU already used by other things )  ÷  vCPU per task
+
+Example (Spot quota raised to 120 vCPU, nothing else on Spot):
+             =  ( 120 − 20 headroom ) ÷ 4  =  25 scenarios at once
+
+Wall-clock   ≈  200 scenarios ÷ 25 at once × 12 min  ≈  96 min      (sequential: 40 hours)</code></pre>
+
+<div class="callout">
+  <strong>The day-one trap</strong>
+  On a new account with the 6-vCPU default, only <em>one</em> 4-vCPU scenario fits at a time. The other launches get rejected, and if your retries keep hammering them, the run is slow and noisy. Before the first real run, check the quota in the <strong>Service Quotas</strong> console and request an increase. Leave headroom too: the vCPUs your forecast API service uses come out of the same On-Demand pool.
+</div>
+
+<h2>4 · The state machine, piece by piece</h2>
+<p>A <strong>Map state</strong> runs the same steps once for each item in a list. In <em>Inline</em> mode it runs up to 40 iterations at once. <em>Distributed</em> mode runs each iteration as a child workflow and goes up to 10,000 in parallel. You need Distributed if you want more than 40 at once, if the execution history would pass 25,000 events, or if the input is bigger than 256 KiB.<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">[5]</a></sup> At 25 concurrent and 200 items, Inline is enough.</p>
+<p>Read it the way you read the task definition in lesson 2: say what each highlighted part does, then click.</p>
+
+<div class="anno">
+<pre><code>{
+  "QueryLanguage": "JSONata",
+  "StartAt": "RunScenarios",
+  "States": {
+    "RunScenarios": {
+      "Type": "Map",
+      <span class="a" data-k="items">"Items": "{% $states.input.scenarios %}",</span>
+      <span class="a" data-k="maxc">"MaxConcurrency": 25,</span>
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "SolveScenario",
+        "States": {
+          "SolveScenario": {
+            "Type": "Task",
+            <span class="a" data-k="sync">"Resource": "arn:aws:states:::ecs:runTask.sync",</span>
+            "Arguments": {
+              "Cluster": "scenario-lab",
+              <span class="a" data-k="tdef">"TaskDefinition": "scenario-solver:5",</span>
+              <span class="a" data-k="spot">"CapacityProviderStrategy": [{ "CapacityProvider": "FARGATE_SPOT", "Weight": 1 }],</span>
+              "NetworkConfiguration": { "AwsvpcConfiguration": {
+                "Subnets": ["subnet-private-a", "subnet-private-b"],
+                "SecurityGroups": ["sg-scenario-worker"], "AssignPublicIp": "DISABLED" } },
+              <span class="a" data-k="ovr">"Overrides": { "ContainerOverrides": [{ "Name": "solver", "Environment": [
+                { "Name": "RUN_ID",      "Value": "{% $states.context.Execution.Name %}" },
+                { "Name": "SCENARIO_ID", "Value": "{% $states.input.id %}" } ] }] },</span>
+              <span class="a" data-k="startedby">"StartedBy": "{% $states.context.Execution.Name %}"</span>
+            },
+            <span class="a" data-k="output">"Output": "{% { 'id': $states.input.id, 'status': 'OK' } %}",</span>
+            <span class="a" data-k="retry">"Retry": [
+              { "ErrorEquals": ["ECS.AmazonECSException", "AmazonECS.Unknown"],
+                "IntervalSeconds": 30, "BackoffRate": 2, "MaxAttempts": 5 },
+              { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 60, "MaxAttempts": 2 }
+            ],</span>
+            <span class="a" data-k="catch">"Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "RecordFailure",
+              "Output": "{% { 'id': $states.input.id, 'status': 'FAILED',
+                             'error': $states.errorOutput.Error } %}" }],</span>
+            "End": true
+          },
+          "RecordFailure": { "Type": "Pass", "End": true }
+        }
+      },
+      "Next": "CompareToBaseline"
+    },
+    <span class="a" data-k="compare">"CompareToBaseline": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Arguments": { "Cluster": "scenario-lab", "TaskDefinition": "scenario-compare:2",
+        "CapacityProviderStrategy": [{ "CapacityProvider": "FARGATE", "Weight": 1 }],
+        "NetworkConfiguration": { "…": "same as above" },
+        "Overrides": { "ContainerOverrides": [{ "Name": "compare", "Environment": [
+          { "Name": "RUN_ID", "Value": "{% $states.context.Execution.Name %}" } ] }] } },
+      "End": true
+    }</span>
+  }
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="items"><b><code>Items</code></b>: the list to loop over, e.g. <code>[{"id": "dallas-cap-80"}, {"id": "supplierB-lt-x2"}, …]</code>. Each item becomes <code>$states.input</code> inside one iteration. Keep items tiny (just IDs). The real parameters are in S3, and an Inline Map's input must stay under 256 KiB.<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">[5]</a></sup></div>
+  <div data-k="maxc"><b><code>MaxConcurrency</code></b>: the number from section 3. At most 25 scenarios run at once. When one finishes, the next one starts. Leave it out and Step Functions runs as many as it can (up to 40 in Inline mode), which could easily exceed your vCPU quota.</div>
+  <div data-k="sync"><b><code>runTask.sync</code></b>: the <code>.sync</code> suffix means "start the task and <em>wait</em> until it stops" (the <em>Run a Job</em> pattern).<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-to-resource.html">[6]</a></sup> Under the hood, Step Functions creates an EventBridge rule to watch the <em>task state change events</em> from lesson 4.<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-ecs.html">[7]</a></sup> If RunTask returns a non-empty <code>failures</code> list, the state fails with <code>AmazonECS.Unknown</code>, so the "always check failures" rule from lesson 4 is enforced for you. Without <code>.sync</code>, the state succeeds as soon as RunTask returns and the Map would "finish" while the solves are still running.</div>
+  <div data-k="tdef"><b><code>TaskDefinition</code></b>: pinned to <code>:5</code> for every iteration. This is the reproducibility rule from the warm-up. Note that Step Functions writes parameters in PascalCase (<code>TaskDefinition</code>, not <code>taskDefinition</code>).<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-ecs.html">[7]</a></sup></div>
+  <div data-k="spot"><b><code>FARGATE_SPOT</code></b>: scenarios are retryable and nobody is waiting on any single one, so they're good Spot candidates (cheaper, but can be interrupted). Section 5 shows what an interruption looks like.</div>
+  <div data-k="ovr"><b><code>Overrides</code></b>: only two short IDs. The task uses them to find its input file and to decide where to write its result. Using the execution name as <code>RUN_ID</code> ties every task and file back to this one run.</div>
+  <div data-k="startedby"><b><code>StartedBy</code></b>: the batch tag from lesson 4, so you can list all of this run's tasks.</div>
+  <div data-k="output"><b><code>Output</code></b>: <strong>shrink what each iteration returns.</strong> By default, a <code>.sync</code> state returns the full task description, which is several KB. The Map gathers all 200 of them into one array, and that can go past Step Functions' 256 KiB payload limit and fail the run right at the end. Returning just <code>{id, status}</code> keeps it small.</div>
+  <div data-k="retry"><b><code>Retry</code></b>: two kinds of trouble. <code>ECS.AmazonECSException</code> covers launch problems such as "capacity is unavailable"<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-fargate-runtask-capacity">[8]</a></sup> (plus <code>AmazonECS.Unknown</code> for a non-empty <code>failures</code> list). Retry those patiently, with backoff. <code>States.TaskFailed</code> covers a task that started and then failed, e.g. a Spot interruption. Retry that a couple of times. <em>Check this on day one:</em> the integration page doesn't spell out how the container's exit code maps to state failure. Run one deliberately failing scenario (exit 1) and look at the error name Step Functions reports before you rely on these rules.</div>
+  <div data-k="catch"><b><code>Catch</code></b>: <strong>the most important line.</strong> Without it, one scenario that keeps failing (say, an infeasible model your code exits 1 for) fails the <em>whole Map</em>, and Step Functions tries to stop all the other running tasks.<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-to-resource.html">[6]</a></sup> With it, that iteration is recorded as <code>FAILED</code> and the other 199 keep going.</div>
+  <div data-k="compare"><b><code>CompareToBaseline</code></b>: runs once, after every iteration has finished. It's on <strong>on-demand</strong> <code>FARGATE</code> because it's a single short step the planner is waiting for. It gets only <code>RUN_ID</code> and reads the scenario list and results from S3 itself. (Passing the Map's 200-item result through an override could hit the 8,192-character limit.)</div>
+</div>
+</div>
+
+<h2>5 · Spot interruptions and retries that can't corrupt results</h2>
+<p>When Fargate needs Spot capacity back, your task gets a <strong>two-minute warning</strong>, delivered both as a task state change event and as <strong>SIGTERM</strong> to the container. The stopped task shows <code>stopCode: TerminationNotice</code> and <code>stoppedReason: "Your Spot Task was interrupted."</code> You can set <code>stopTimeout</code> up to 120 seconds to make full use of the warning. Also, Fargate doesn't swap in on-demand capacity when Spot runs short. Spot tasks just wait longer.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html">[9]</a></sup></p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Make every scenario idempotent</h3>
+    <p>A retry runs the <em>same</em> scenario again. Design it so running twice gives the same final state as running once:</p>
+    <ul>
+      <li>The output key depends only on the run and scenario: <code>runs/&lt;run_id&gt;/results/&lt;id&gt;.json</code>. A retry overwrites the same file instead of adding a second one.</li>
+      <li>Write the result <strong>last</strong>, in a single PUT. A half-finished solve leaves no result file rather than a misleading one.</li>
+      <li>Exit 0 only after that write succeeds (the contract from lesson 4).</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Use the two minutes</h3>
+    <ul>
+      <li>Catch SIGTERM in Python (<code>signal.signal(signal.SIGTERM, …)</code>), tell the solver to stop, and exit.</li>
+      <li>For a 12-minute solve, starting over is fine. For a 3-hour solve, save the best solution found so far (the incumbent) to S3 every few minutes, and pass it as a warm start on the retry.</li>
+      <li>If a scenario keeps getting interrupted, add a final fallback: a Catch path that re-runs it on <code>FARGATE</code> on-demand.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>6 · Collecting the results</h2>
+<figure>
+<pre><code>s3://scenario-lab/runs/run-2026-10-22-a/
+  manifest.json            ← run_id, task definition :5, image tag, solver settings, list of 200 scenario ids
+  baseline/result.json     ← same revision, unchanged inputs
+  scenarios/&lt;id&gt;.json      ← inputs: what this scenario changes
+  results/&lt;id&gt;.json        ← outputs: objective, cost breakdown, service level, solve status, MIP gap
+  comparison.csv           ← written by CompareToBaseline: one row per scenario, deltas vs baseline</code></pre>
+<figcaption>One folder per run. The manifest is your reproducibility record: anyone can see exactly which code and settings produced these numbers.</figcaption>
+</figure>
+<p>The compare task does three things: it loads the baseline, loads every <code>results/&lt;id&gt;.json</code>, and <strong>reconciles them against the manifest</strong>. Any scenario that's listed but has no result shows up as <code>MISSING</code> in the comparison instead of quietly disappearing. That reconciliation is your second line of defence, after the Catch. Then it writes the delta table and (via SNS, as in lesson 4) tells the planner the run is ready.</p>
+
+<div class="seq" data-seq="s-scenario-run"></div>
+<script type="application/json" id="s-scenario-run">
+{
+  "title": "Put one Scenario Lab run in order",
+  "intro": "Click the steps in the order they happen.",
+  "steps": [
+    "Scenario API writes manifest.json and one input file per scenario to S3",
+    "API starts a Step Functions execution with the list of scenario IDs",
+    "Map starts up to 25 runTask.sync tasks at a time on FARGATE_SPOT",
+    "Each task reads its input from S3, solves, writes results/<id>.json, exits 0",
+    "Interrupted or failed iterations are retried; ones that still fail are caught as FAILED",
+    "CompareToBaseline (on-demand) reconciles results with the manifest and writes comparison.csv",
+    "SNS notifies the planner that the comparison is ready"
+  ],
+  "why": "The input files exist before anything runs, the Map controls how many solve at once and absorbs failures, and the comparison only starts once every iteration has finished, successfully or not."
+}
+</script>
+
+<h2>Practice</h2>
+<div class="quiz" data-quiz="q-many"></div>
+<script type="application/json" id="q-many">
+{
+  "title": "Design the fan-out",
+  "shuffle": true,
+  "questions": [
+    { "q": "Why can't you start 10 different scenarios with one RunTask call using count=10?",
+      "options": ["All copies get the same overrides", "count only works for ECS services", "count is limited to EC2 capacity", "Spot doesn't support count above 1"], "answer": 0,
+      "why": "count makes identical copies. Different scenarios need different SCENARIO_IDs, so one call (or one queue message) each." },
+    { "q": "Your Spot vCPU quota is 160 and nothing else uses Spot. Each scenario is 4 vCPU. You keep 20 vCPU headroom. What MaxConcurrency?",
+      "options": ["35", "40", "25", "160"], "answer": 0,
+      "why": "(160 − 20) ÷ 4 = 35. That's still within the Inline Map limit of 40." },
+    { "q": "Next quarter you want 300 scenarios running at the same time. What changes in the state machine?",
+      "options": ["Switch Map to Distributed mode", "Raise inline MaxConcurrency to 300", "Use count=10 inside each iteration", "Split into eight Parallel branches"], "answer": 0,
+      "why": "Inline Map tops out at 40 concurrent iterations. Distributed runs child workflows, up to 10,000 in parallel (and you'd need the vCPU quota to match)." },
+    { "q": "All 200 solves finished, but the execution failed at the very end with a payload-size error. Most likely fix?",
+      "options": ["Shrink each iteration's Output field", "Raise each task's memory limit", "Lower MaxConcurrency down to 10", "Move results into env overrides"], "answer": 0,
+      "why": "By default each .sync iteration returns a full task description. 200 of them gathered into one array can exceed the 256 KiB limit. Shrink the Output." },
+    { "q": "One scenario is infeasible, so your code exits 1. There's no Catch on the iteration. What happens to the run?",
+      "options": ["Whole Map fails, others are stopped", "Only that scenario is marked failed", "ECS restarts it until it succeeds", "Compare step runs without that one"], "answer": 0,
+      "why": "An uncaught iteration failure fails the Map, and Step Functions tries to stop the other in-flight tasks. Add a Catch per iteration." },
+    { "q": "A Spot interruption hits a scenario after it wrote results/x.json but before exit. The retry solves it again. What's the effect?",
+      "options": ["Same key is overwritten: no harm", "Two result files for one scenario", "The compare step counts it twice", "The retry fails: file already exists"], "answer": 0,
+      "why": "The output key depends only on run_id and scenario id, so the retry overwrites the same object. That's what idempotent means here." },
+    { "q": "Planners submit single what-ifs from a web UI all day, in no fixed batch. Which shape fits best?",
+      "options": ["SQS queue plus worker service", "A Step Functions Inline Map", "A laptop RunTask loop script", "An EventBridge Scheduler cron job"], "answer": 0,
+      "why": "A continuous stream suits a queue and a pool of workers that scales on backlog (lesson 6). The Map shape is for a batch with a known end." },
+    { "q": "Why does CompareToBaseline run on FARGATE (on-demand) while the scenarios run on FARGATE_SPOT?",
+      "options": ["A short step the planner awaits", "Spot tasks cannot read S3 results", "Compare tasks need a public IP", "The final state must be on-demand"], "answer": 0,
+      "why": "The 200 scenarios are retryable and nobody waits on any single one. The compare step is the one thing the planner is waiting for, and it's cheap to run on-demand." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>300 scenarios at the same time: why isn't raising MaxConcurrency enough?</summary>
+<p>Because <strong>Inline mode has a hard ceiling of 40 concurrent iterations</strong>. <code>MaxConcurrency</code> can only set a limit <em>under</em> that ceiling, never above it. Set it to 300 and you still get at most 40 at once.<sup class="cite"><a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">[5]</a></sup></p>
+<pre><code>Inline Map        ceiling 40         each iteration runs inside the parent workflow
+Distributed Map   ceiling 10,000     each iteration is its own child workflow
+MaxConcurrency    your limit, always ≤ the mode's ceiling</code></pre>
+<ul>
+<li><strong>What changes:</strong> <code>"ProcessorConfig": { "Mode": "DISTRIBUTED", "ExecutionType": "STANDARD" }</code>, then <code>MaxConcurrency: 300</code>. The iteration steps (<code>runTask.sync</code>, Retry, Catch) stay the same.</li>
+<li><strong>The other half of the answer:</strong> 300 × 4 vCPU = <strong>1,200 vCPU</strong> of Spot quota, plus headroom. The state machine change does nothing if the quota stays at 120.</li>
+<li><strong>A bonus of Distributed:</strong> each child workflow has its own execution history, so you also stay clear of the 25,000-event history limit. And it can read the scenario list straight from S3 instead of passing it in.</li>
+<li><strong>Why the wrong answers fail:</strong> <code>count=10</code> gives identical copies (same overrides). Splitting into 8 Parallel branches means 8 Inline Maps to keep in sync by hand, which is a workaround for exactly what Distributed mode already does.</li>
+</ul>
+<p class="muted">Rule of thumb: whenever you need more than 40 at once, the answer is Distributed mode, never a bigger number on Inline.</p>
+</details>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-ecs.html">Run Amazon ECS or Fargate tasks with Step Functions</a> (short, with the IAM policy Step Functions needs). Then read <a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">Map workflow state</a> for Inline vs Distributed, and <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/throttling.html">AWS Fargate throttling quotas</a>.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "what IAM role does the state machine need?", "how would the forecast what-ifs fit into the same run?", "when would AWS Batch be better than this?" or "how do I make the solver stop cleanly on SIGTERM?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> Lesson 6, services in production: rolling deployments and rollback, Service Auto Scaling for the forecast API, and the Scenario Lab's SQS workers scaling on queue depth.</p>
+  <p>Cheat sheets: <a href="../reference/running-many-jobs.html">Running many jobs</a> · <a href="../reference/running-jobs.html">Running jobs</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a> · <a href="../reference/ecs-building-blocks.html">Building blocks</a></p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">ECS API: RunTask</a> · [2] <a href="https://docs.aws.amazon.com/general/latest/gr/eks.html">AWS Fargate service quotas</a> · [3] <a href="https://aws.amazon.com/fargate/faqs/">Fargate FAQs</a> · [4] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/throttling.html">Fargate throttling quotas</a> · [5] <a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">Step Functions: Map state</a> · [6] <a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-to-resource.html">Step Functions: integration patterns (.sync)</a> · [7] <a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-ecs.html">Step Functions: ECS integration</a> · [8] <a href="https://repost.aws/knowledge-center/ecs-fargate-runtask-capacity">re:Post: RunTask "Capacity is unavailable"</a> · [9] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html">ECS: Fargate Spot termination notices</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/sequence.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

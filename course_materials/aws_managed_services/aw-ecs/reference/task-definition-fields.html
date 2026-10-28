@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task Definition Fields</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0002-reading-a-task-definition.html">From lesson 2</a> · <a href="ecs-building-blocks.html">Building blocks cheat sheet</a></nav>
+<h1>Fargate task definition: field guide</h1>
+<p class="subtitle">What each field does, and which ones Fargate requires. Source: <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">Task definition parameters for Fargate</a>.</p>
+
+<h2>Task level: the box</h2>
+<div class="table-wrap"><table>
+  <tr><th>Field</th><th>On Fargate</th><th>What it is</th></tr>
+  <tr><td><code>family</code></td><td>Required</td><td>Blueprint name. Revisions are <code>family:1</code>, <code>:2</code>…</td></tr>
+  <tr><td><code>requiresCompatibilities</code></td><td>Set <code>["FARGATE"]</code></td><td>Checks every field is Fargate-valid at registration</td></tr>
+  <tr><td><code>networkMode</code></td><td>Must be <code>awsvpc</code></td><td>Each task gets its own network interface</td></tr>
+  <tr><td><code>runtimePlatform</code></td><td>Defaults: <code>LINUX</code>, <code>X86_64</code></td><td>OS and CPU architecture. <code>ARM64</code> is allowed for Linux, and the image must match</td></tr>
+  <tr><td><code>cpu</code>, <code>memory</code></td><td>Required, valid pair</td><td>Size of the whole task (table below)</td></tr>
+  <tr><td><code>ephemeralStorage</code></td><td>Optional</td><td>Scratch disk: ≥20 GiB by default, up to 200 GiB. Holds the image too. Wiped when the task stops. <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-taskdef-ephemeralstorage.html">docs</a></td></tr>
+  <tr><td><code>executionRoleArn</code></td><td>Needed for ECR, awslogs, secrets</td><td>Role used by <span class="aws">ECS/Fargate</span> to start your task</td></tr>
+  <tr><td><code>taskRoleArn</code></td><td>Optional</td><td>Role used by <span class="you">your code</span> (boto3) at runtime</td></tr>
+  <tr><td><code>containerDefinitions</code></td><td>Required</td><td>The containers (app + any sidecars)</td></tr>
+</table></div>
+
+<h2>Container level: what runs</h2>
+<div class="table-wrap"><table>
+  <tr><th>Field</th><th>Docker equivalent</th><th>Notes</th></tr>
+  <tr><td><code>name</code></td><td><code>--name</code></td><td>Appears in log stream names</td></tr>
+  <tr><td><code>image</code></td><td>image argument</td><td>Pin an explicit tag, not <code>latest</code></td></tr>
+  <tr><td><code>essential</code></td><td>none</td><td>Defaults to true. If an essential container stops, the whole task stops. Each task needs ≥1</td></tr>
+  <tr><td><code>command</code></td><td><code>COMMAND</code> / <code>CMD</code></td><td>One string per argument</td></tr>
+  <tr><td><code>environment</code></td><td><code>-e</code></td><td>Plain config only, never passwords</td></tr>
+  <tr><td><code>secrets</code></td><td>none</td><td>The ARN of a Secrets Manager or SSM value, injected as an env var at start. <code>…:key::</code> picks one JSON key</td></tr>
+  <tr><td><code>portMappings</code></td><td><code>-p</code></td><td>Only if something calls in (APIs). Batch jobs leave it out</td></tr>
+  <tr><td><code>logConfiguration</code></td><td><code>--log-driver</code></td><td><code>awslogs</code>: group + region required, plus stream-prefix on Fargate. Stream name = <code>prefix/container/task-id</code></td></tr>
+  <tr><td><code>stopTimeout</code></td><td><code>docker stop -t</code></td><td>Seconds between the stop signal (SIGTERM) and a forced kill. Default 30, max 120</td></tr>
+</table></div>
+
+<h2>The two roles</h2>
+<div class="grid">
+  <div class="card">
+    <h3 class="aws">Execution role</h3>
+    <p>Used by ECS/Fargate to <strong>start</strong> your task:</p>
+    <ul>
+      <li>pull from private ECR</li>
+      <li>send logs to CloudWatch</li>
+      <li>fetch <code>secrets</code></li>
+    </ul>
+    <p>Your containers can't use its credentials. Managed policy: <code>AmazonECSTaskExecutionRolePolicy</code>. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3 class="you">Task role</h3>
+    <p>Used by <strong>your code</strong> once it's running, for things like S3 reads and writes, Bedrock, DynamoDB or SQS. Give each app its own role with only the permissions it needs.</p>
+    <p><em>Rule:</em> if it fails <strong>before</strong> your code runs, check the execution role. If your code gets <code>AccessDenied</code>, check the task role.</p>
+  </div>
+</div>
+
+<h2>Valid Fargate CPU/memory pairs</h2>
+<div class="table-wrap"><table>
+  <tr><th>CPU</th><th>Memory</th></tr>
+  <tr><td>256 (.25 vCPU)</td><td>512 MiB, 1 GB, 2 GB</td></tr>
+  <tr><td>512 (.5 vCPU)</td><td>1 to 4 GB</td></tr>
+  <tr><td>1024 (1 vCPU)</td><td>2 to 8 GB</td></tr>
+  <tr><td>2048 (2 vCPU)</td><td>4 to 16 GB, 1 GB steps</td></tr>
+  <tr><td>4096 (4 vCPU)</td><td>8 to 30 GB, 1 GB steps</td></tr>
+  <tr><td>8192 (8 vCPU)</td><td>16 to 60 GB, 4 GB steps</td></tr>
+  <tr><td>16384 (16 vCPU)</td><td>32 to 120 GB, 8 GB steps</td></tr>
+  <tr><td>32768 (32 vCPU)</td><td>60, 120 or 244 GB</td></tr>
+</table></div>
+<p class="muted">Sizes of 8 vCPU and up need Linux platform version 1.4.0+. Check the <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">current table</a> before relying on it, because AWS adds sizes over time.</p>
+
+<h2>Network modes</h2>
+<div class="table-wrap"><table>
+  <tr><th>Mode</th><th>Meaning</th><th>Fargate?</th></tr>
+  <tr><td><code>awsvpc</code></td><td>Task gets its own network interface, IP and security groups</td><td>Required</td></tr>
+  <tr><td><code>bridge</code></td><td>Shares the host interface through a Docker bridge. Default if unset</td><td>No (EC2)</td></tr>
+  <tr><td><code>host</code></td><td>Directly on the host network</td><td>No (EC2, Managed Instances)</td></tr>
+  <tr><td><code>none</code></td><td>No external networking</td><td>No (EC2)</td></tr>
+</table></div>
+<p>The task definition says <strong>how</strong> (<code>awsvpc</code>). RunTask or the service's <code>networkConfiguration</code> says <strong>where</strong>: subnets in one VPC, security groups, <code>assignPublicIp</code>. Use your own private subnets, with a NAT gateway or VPC endpoints so the task can reach ECR, S3 and CloudWatch. <a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-register-task-definition-request/-builder/network-mode.html">docs</a></p>
+
+<h2>Run-time overrides</h2>
+<ul>
+  <li>Order of priority: <strong>RunTask override &gt; task definition <code>environment</code> &gt; Dockerfile <code>ENV</code></strong>. <code>command</code> in the task definition replaces the image's <code>CMD</code>, and an override replaces both.</li>
+  <li>All overrides together are limited to <strong>8,192 characters</strong>, so pass an S3 pointer, not the data. <code>startedBy</code> (up to 128 characters) tags a batch. <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">docs</a></li>
+  <li>For scenarios, use one pinned revision and many runs, never many revisions.</li>
+</ul>
+
+<h2>Stop lifecycle</h2>
+<pre><code>(behind a load balancer: deregister first) → SIGTERM → wait up to stopTimeout (30s default, 120s max) → SIGKILL</code></pre>
+<p><strong>It happens on:</strong> StopTask, deployments, scale-in, Fargate Spot interruptions (2-minute notice), and when an essential container stops.</p>
+<p><strong>It doesn't happen</strong> when the process exits on its own. Long solves should checkpoint on SIGTERM. <a href="https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/">AWS blog</a></p>
+
+<h2>One blueprint, many runs</h2>
+<p>When you run a task, you can override a container's <strong>command</strong> and <strong>environment variables</strong> for that run only. This is how Scenario Lab runs 200 what-ifs from a single revision. <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-service-edit-container-overrides.html">docs</a></p>
+</main>
+</body>
+</html>

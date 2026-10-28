@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploying a Service</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0005-running-many-jobs.html">← Lesson 5</a> · Lesson 6 · <a href="../reference/service-deployments.html">Cheat sheet</a></nav>
+
+<h1>Deploying a service safely</h1>
+<p class="subtitle">Shipping a new forecast model to a live API with no downtime, and an automatic way back</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  You can predict exactly what ECS does when you ship <code>forecast-api:8</code> to replace <code>:7</code>: how many tasks run at each moment, when traffic moves, and what happens if the new version is broken. You'll also know which settings make it roll back on its own, and which kind of broken they <em>can't</em> catch.
+</div>
+
+<h2>Warm-up</h2>
+<p>From lessons 1 to 4. Answer from memory before you click.</p>
+<div class="quiz" data-quiz="q-warmup6"></div>
+<script type="application/json" id="q-warmup6">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "The new forecast model downloads its weights from S3 when the container starts. Which role needs s3:GetObject?",
+      "options": ["The task role", "The exec role", "The cron role", "The user role"], "answer": 0,
+      "why": "Your code makes the S3 call, so it uses the task role. The execution (exec) role is for what ECS does before your code runs: pulling the image, sending logs, fetching secrets." },
+    { "q": "One of the forecast API's four tasks crashes at 3pm. What happens next?",
+      "options": ["Service starts a replacement task", "Nothing until someone calls RunTask", "The whole service stops entirely", "Cluster restarts every other container"], "answer": 0,
+      "why": "A service keeps the desired count running. A standalone task that stops just stays stopped." },
+    { "q": "The forecast API's task has the app container plus a telemetry sidecar marked essential. The sidecar crashes. What happens?",
+      "options": ["The whole task stops", "Only the sidecar restarts", "The app keeps running", "ECS ignores sidecar crashes"], "answer": 0,
+      "why": "If any essential container stops, the whole task stops. Then the service replaces the task." },
+    { "q": "The ALB sends traffic to Fargate tasks. Which target type must its target group use?",
+      "options": ["ip", "instance", "lambda", "alb"], "answer": 0,
+      "why": "With awsvpc, each task has its own IP address, so the target group registers task IPs." },
+    { "q": "A new model version is bigger. Its tasks keep stopping with exit code 137 and memory flat at the limit. Most likely cause?",
+      "options": ["The task ran out of memory", "The image tag doesn't exist here", "Your Python code raised an error", "The health check path is wrong"], "answer": 0,
+      "why": "137 is SIGKILL, typically from running out of memory. A bigger model can push a task past its memory size, which shows up as failed tasks during a deployment." }
+  ]
+}
+</script>
+
+<h2>1 · What a deployment is</h2>
+<p>The forecast API is a service running 4 tasks of <code>forecast-api:7</code> behind an ALB. You've trained a better model, built a new image and registered revision <code>:8</code>. Shipping it is one call:</p>
+<pre><code>aws ecs update-service --cluster forecasting --service forecast-api --task-definition forecast-api:8</code></pre>
+<p>That call starts a <strong>deployment</strong>: ECS replaces the service's existing tasks with tasks from the new revision.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/">[1]</a></sup> For a while, old and new tasks run side by side. Each deployment has a <em>rollout state</em>: it starts as <code>IN_PROGRESS</code>, becomes <code>COMPLETED</code> when the service reaches a steady state, or <code>FAILED</code> if it can't.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">[2]</a></sup></p>
+<p class="muted">You also trigger a deployment with "force new deployment" and the <em>same</em> revision, for example to pick up a rotated secret, which is only read when a container starts.</p>
+
+<h2>2 · Rolling update: the settings, piece by piece</h2>
+<p>The default way to deploy is the <strong>rolling update</strong>. These are the service settings that control it. Say what each highlighted part does, then click to check.</p>
+
+<div class="anno">
+<pre><code>{
+  "serviceName": "forecast-api",
+  "taskDefinition": "forecast-api:8",
+  <span class="a" data-k="desired">"desiredCount": 4,</span>
+  <span class="a" data-k="grace">"healthCheckGracePeriodSeconds": 120,</span>
+  "deploymentConfiguration": {
+    <span class="a" data-k="strategy">"strategy": "ROLLING",</span>
+    <span class="a" data-k="max">"maximumPercent": 200,</span>
+    <span class="a" data-k="min">"minimumHealthyPercent": 100,</span>
+    <span class="a" data-k="cb">"deploymentCircuitBreaker": { "enable": true, "rollback": true },</span>
+    <span class="a" data-k="alarms">"alarms": { "alarmNames": ["forecast-api-5xx-high"], "enable": true, "rollback": true }</span>
+  }
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="desired"><b><code>desiredCount</code></b>: 4 tasks in normal running. The two percentages below are percentages <em>of this number</em>.</div>
+  <div data-k="grace"><b><code>healthCheckGracePeriodSeconds</code></b>: after a task starts, ECS ignores failed load balancer health checks for this long. The default is <strong>0</strong>.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_ecs.CfnService.html">[3]</a></sup> The forecast API needs about 90 seconds to load its model. With 0, the ALB marks new tasks unhealthy before they're ready, ECS replaces them, and the new tasks never get the chance to finish starting. Set it a bit longer than your slowest startup, counting the image pull too.<sup class="cite"><a href="https://repost.aws/knowledge-center/elb-ecs-tasks-improperly-replaced">[4]</a></sup></div>
+  <div data-k="strategy"><b><code>strategy</code></b>: <code>ROLLING</code> replaces tasks in batches. Section 4 covers the alternatives (<code>BLUE_GREEN</code>, <code>LINEAR</code>, <code>CANARY</code>).<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">[5]</a></sup></div>
+  <div data-k="max"><b><code>maximumPercent</code></b>: the most tasks allowed (running or pending) <em>during</em> the deployment, as a percentage of desiredCount. 200% × 4 = up to <strong>8</strong>: ECS may start all 4 new tasks before stopping any old ones. The default is 200%.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">[5]</a></sup></div>
+  <div data-k="min"><b><code>minimumHealthyPercent</code></b>: the fewest healthy running tasks allowed during the deployment. 100% × 4 = never fewer than <strong>4</strong> healthy tasks, so capacity never dips. The default is 100%.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">[5]</a></sup> 100/200 is the usual zero-downtime choice.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-deploy-tasks-no-downtime">[6]</a></sup> Lower values exist for EC2 clusters with no spare room. On Fargate there's no cluster to fill up, so you rarely need them.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/">[1]</a></sup></div>
+  <div data-k="cb"><b><code>deploymentCircuitBreaker</code></b>: notices when the new revision can't become healthy, marks the deployment <code>FAILED</code> and, with <code>rollback: true</code>, goes back to the last deployment that <code>COMPLETED</code>. See section 3.</div>
+  <div data-k="alarms"><b><code>alarms</code></b>: the second safety net. If a CloudWatch alarm you name goes off during the deployment (here: "too many HTTP 5xx errors"), ECS rolls back. This catches problems the circuit breaker can't see. See section 3.</div>
+</div>
+</div>
+
+<h3>What "healthy" means here</h3>
+<p>A new task counts towards <code>minimumHealthyPercent</code> only when it passes its checks. With a load balancer, that means the <strong>target group health check</strong>, plus the <strong>container health check</strong> if you defined one.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">[5]</a></sup> That's why the <code>/health</code> endpoint from lesson 3 matters so much: it's what decides whether a deployment can move forward.</p>
+
+<h3>Stopping the old tasks gently</h3>
+<p>Old tasks don't just vanish. First they're removed from the target group (the <code>DEACTIVATING</code> state from lesson 4). The ALB stops sending them <em>new</em> requests but lets in-flight ones finish, for up to the target group's <strong>deregistration delay</strong> (300 seconds by default).<sup class="cite"><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html#deregistration-delay">[7]</a></sup> Only then do they get SIGTERM, and SIGKILL after <code>stopTimeout</code> (lesson 2). A forecast request takes under a second, so a 30-second delay would be plenty and makes deployments faster.</p>
+
+<div class="seq" data-seq="s-rolling"></div>
+<script type="application/json" id="s-rolling">
+{
+  "title": "Put a rolling deployment in order",
+  "intro": "4 tasks of :7 are running, with min 100% and max 200%. Click the steps in the order they happen.",
+  "steps": [
+    "You register forecast-api:8 and call UpdateService",
+    "ECS starts 4 tasks of :8 (8 in total, within maximumPercent)",
+    "The :8 tasks load the model; the grace period ignores early failed health checks",
+    "The :8 tasks pass the target group health check and start receiving traffic",
+    "The :7 tasks are deregistered and drain their in-flight requests",
+    "The :7 tasks get SIGTERM and stop",
+    "The deployment's rollout state becomes COMPLETED"
+  ],
+  "why": "With min 100%, nothing old stops until enough new tasks are healthy. Old tasks leave traffic first (drain), then stop. The grace period protects the slow model-loading start."
+}
+</script>
+
+<h2>3 · When the new version is broken</h2>
+<p>Suppose <code>:8</code> is bad. What happens depends on <em>how</em> it's bad.</p>
+
+<div class="table-wrap"><table>
+  <tr><th>How :8 is broken</th><th>Without safety nets</th><th>With them</th></tr>
+  <tr><td>It never starts: wrong image tag, missing secret, crashes on import (exit 1)</td><td>ECS keeps launching replacement tasks, and the deployment sits in <code>IN_PROGRESS</code> for a long time. The <code>:7</code> tasks keep serving, so customers are fine, but you're stuck.</td><td rowspan="2"><strong>Circuit breaker</strong> counts the failures, marks the deployment <code>FAILED</code> and rolls back to <code>:7</code>.</td></tr>
+  <tr><td>It starts but fails <code>/health</code>, e.g. the model file is missing</td><td>The same loop: tasks start, fail health checks, get replaced.</td></tr>
+  <tr><td>It's healthy but <em>wrong</em>: <code>/health</code> passes, but 30% of forecast requests return 500</td><td>The deployment completes. <code>:7</code> is gone, and customers get errors.</td><td><strong>Alarm-based rollback</strong>: the 5xx alarm goes off during the deployment, and ECS rolls back.</td></tr>
+</table></div>
+
+<p><strong>How the circuit breaker decides.</strong> It watches in two stages. First: do new tasks reach <code>RUNNING</code>? Then: do they pass their health checks (load balancer and container)? Each failed task adds to a count. By default the limit is <strong>half the desired count, but at least 3 and at most 200</strong>.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-deployment-roll-back-failure">[8]</a></sup> For the forecast API (desired 4): 0.5 × 4 = 2, which is raised to the minimum of 3. So 3 failed tasks fail the deployment. By default, a task that does become healthy resets the count to 0.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">[2]</a></sup></p>
+
+<p><strong>Where it rolls back to:</strong> the most recent deployment in the <code>COMPLETED</code> state. If there isn't one (say, the very first deployment of a new service is broken), there's nothing to go back to, and the deployment just stops.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">[2]</a></sup></p>
+
+<div class="callout">
+  <strong>Healthy is not the same as correct</strong>
+  The circuit breaker only knows about starting and health checks. A model that loads fine but predicts nonsense, or a code change that returns 500 on some inputs, sails straight through. That's what the alarm is for. It's the same idea as lesson 4's "the schedule fired ≠ the plan was written": every check only proves what it actually tests.
+</div>
+
+<p><strong>Getting told.</strong> When a deployment fails, ECS sends a <em>service deployment state change</em> event to EventBridge (<code>SERVICE_DEPLOYMENT_FAILED</code>), and AWS recommends a rule that watches for it.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">[2]</a></sup> Send it to SNS, exactly like the planner alerts in lesson 4.</p>
+
+<h2>4 · Beyond rolling: blue/green, linear, canary</h2>
+<p>ECS also has deployment strategies built in that move <strong>traffic</strong> at the load balancer instead of swapping tasks in batches. The new version (green) starts at full size next to the old one (blue), and the ALB shifts requests between them:<sup class="cite"><a href="https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-ecs-built-in-linear-canary-deployments/">[9]</a></sup><sup class="cite"><a href="https://aws.amazon.com/blogs/containers/gradual-deployments-in-amazon-ecs-with-linear-and-canary-strategies/">[10]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>Strategy</th><th>How traffic moves</th><th>Forecasting example</th></tr>
+  <tr><td><code>BLUE_GREEN</code></td><td>All at once, in one step</td><td>A new feature pipeline you've fully tested and want to flip over in one go</td></tr>
+  <tr><td><code>LINEAR</code></td><td>Equal steps (e.g. 25% at a time), with a pause between steps</td><td>A routine model refresh you want to watch grow gradually</td></tr>
+  <tr><td><code>CANARY</code></td><td>A small share first (e.g. 10%), a pause, then the rest</td><td>A brand-new model architecture: let 10% of requests try it before everyone does</td></tr>
+</table></div>
+<p>All three have a <strong>bake time</strong>: after all traffic has moved, the old version keeps running for a while, so rolling back is instant (just send traffic back) rather than a fresh deployment.<sup class="cite"><a href="https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-ecs-built-in-linear-canary-deployments/">[9]</a></sup> They use CloudWatch alarms to detect failure. The circuit breaker is for rolling updates only.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">[5]</a></sup> The trade-off: for a while you pay for both versions at full size.</p>
+<p class="muted">The details of configuring these (target groups for each version, listener rules, lifecycle hooks) are for when you have an account. For now, know that they exist and when you'd pick each one.</p>
+
+<h2>Practice</h2>
+<div class="quiz" data-quiz="q-deploy"></div>
+<script type="application/json" id="q-deploy">
+{
+  "title": "Predict the deployment",
+  "shuffle": true,
+  "questions": [
+    { "q": "desiredCount 6, minimumHealthyPercent 100, maximumPercent 200. What's the most tasks that can be running or pending during the deployment?",
+      "options": ["12", "6", "9", "18"], "answer": 0,
+      "why": "200% of 6 = 12. ECS can start all 6 new tasks before stopping any old ones." },
+    { "q": "An EC2 cluster has no spare room. desiredCount 4, minimumHealthyPercent 50, maximumPercent 100. What does ECS do first?",
+      "options": ["Stops two old tasks first", "Starts four new tasks first", "Stops all four old tasks", "Refuses to start the deployment"], "answer": 0,
+      "why": "Max 100% means no extra tasks. Min 50% allows dropping to 2. So ECS stops 2 old tasks to make room, starts 2 new ones, then repeats." },
+    { "q": "The new model takes 150 seconds to load, and healthCheckGracePeriodSeconds is 0. What do you see?",
+      "options": ["New tasks replaced before getting ready", "Deployment completes, only a bit slower", "Old tasks are stopped before starting", "The ALB waits automatically for readiness"], "answer": 0,
+      "why": "With no grace period, failed health checks count immediately. Tasks get replaced while they're still loading. Set the grace period above 150 seconds." },
+    { "q": ":8 crashes on startup with exit code 1. Desired count is 4, with the circuit breaker and rollback on. What happens?",
+      "options": ["After three failures it rolls back", "After one failure it rolls back", "It retries forever, never rolling back", "It rolls back after eight failures"], "answer": 0,
+      "why": "The threshold is 0.5 × desired (2), raised to the minimum of 3. After 3 failed tasks: FAILED, then a rollback to the last COMPLETED deployment." },
+    { "q": ":8 passes /health, but 30% of forecast requests now return HTTP 500. What catches it?",
+      "options": ["A 5xx-rate alarm with auto-rollback", "The deployment circuit breaker alone", "A longer health-check grace period", "A larger minimumHealthyPercent, say 150"], "answer": 0,
+      "why": "The circuit breaker only sees starting and health checks, and :8 passes both. An alarm on the error rate, with rollback enabled, catches it." },
+    { "q": "There's no circuit breaker, and the :8 image tag doesn't exist. What does the deployment look like?",
+      "options": ["Stuck in progress, :7 still serving", "Completed, with zero tasks now running", "Failed at once, rolled back immediately", "Customers see errors straight away now"], "answer": 0,
+      "why": "With min 100%, the :7 tasks keep serving while ECS keeps trying to launch :8 tasks that can't pull their image. Customers are fine, but the deployment never finishes." },
+    { "q": "A brand-new model architecture should get 10% of requests for 20 minutes before everyone. Which strategy?",
+      "options": ["CANARY", "ROLLING", "LINEAR", "BLUE_GREEN"], "answer": 0,
+      "why": "Canary sends a small share first, waits (the canary bake time), then shifts the rest. Linear moves traffic in several equal steps." },
+    { "q": "Why might you set the target group's deregistration delay to 30 seconds for the forecast API?",
+      "options": ["Requests are short, so drain faster", "Fargate mandates a thirty second delay", "It shortens the health check interval", "It keeps old tasks running longer"], "answer": 0,
+      "why": "The delay is how long old tasks keep finishing in-flight requests. Forecast calls take under a second, so 300 seconds just makes every deployment slower." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>Is registering a new revision separate from updating the service? How can a wrong image tag break a service update?</summary>
+<p><strong>Yes, they're two separate steps.</strong> Registering <code>:8</code> just saves a new recipe. Nothing runs, and nothing is checked against the registry. The image field is only a string at that point. <code>update-service</code> is what points the service at <code>:8</code> and starts the deployment.</p>
+<pre><code>1. register-task-definition  → forecast-api:8 saved     (image tag NOT checked)
+2. update-service :8         → deployment IN_PROGRESS
+3. ECS launches an :8 task   → Fargate pulls the image  ← the tag is checked HERE
+4. tag missing               → CannotPullContainerError, task stops, never RUNNING</code></pre>
+<ul>
+<li><strong>Why it hurts the deployment:</strong> step 3 happens <em>during</em> the update. Every new task fails at the image pull, so the service keeps launching replacements that fail the same way. That's stage 1 of the circuit breaker: "do new tasks reach <code>RUNNING</code>?"<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">[2]</a></sup></li>
+<li><strong>The same goes for the other two in that row:</strong> a missing secret also fails before your code runs (the execution role fetches secrets at startup). A crash on import gets as far as your code, then exits 1.</li>
+<li><strong>Why customers don't notice:</strong> with min 100%, the <code>:7</code> tasks only stop once <code>:8</code> tasks are healthy. No healthy <code>:8</code> task ever appears, so <code>:7</code> keeps serving.</li>
+</ul>
+<p><strong>Follow-up: is a missing tag the only cause?</strong> No. <code>CannotPullContainerError</code> means "couldn't pull". The tag can exist and the pull still fails if the <strong>execution role</strong> can't read from ECR, the task's private subnet has <strong>no route to ECR</strong> (no NAT or VPC endpoints, lesson 3), or the image is in another account the role can't reach.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-pull-container-error">[11]</a></sup> The reverse trap: a <em>reused</em> tag pulls fine but gives you a different image than you expected. That's the immutability topic in the images lesson.</p>
+<p class="muted">How it typically happens: you register <code>:8</code> with tag <code>v8</code> before the image push finished, or with a typo. The stopped task's reason shows <code>CannotPullContainerError</code>.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-pull-container-error">[11]</a></sup> Lesson 8 covers reading these.</p>
+</details>
+
+<details class="qa">
+<summary>What's the difference between the ALB health check and a container health check?</summary>
+<p><strong>Who asks, and from where.</strong> The ALB health check comes from <em>outside</em>: the load balancer sends an HTTP request over the network to the task's IP and port. A container health check runs <em>inside</em>: ECS runs a command in the container and looks at its exit code.</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>ALB health check</th><th>Container health check</th></tr>
+  <tr><td>Configured on</td><td>The target group (path such as <code>/health</code>, interval, thresholds, expected status code)</td><td>The container definition in the task definition (<code>healthCheck</code>)</td></tr>
+  <tr><td>How it checks</td><td>HTTP request from the ALB to <code>task-IP:8000/health</code></td><td>A command in the container, e.g. <code>["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]</code>. Exit 0 = healthy</td></tr>
+  <tr><td>What it proves</td><td>Traffic can reach the task and gets a good reply: port, security groups and app all line up</td><td>The process inside is OK, even when nothing sends it traffic</td></tr>
+  <tr><td>Startup allowance</td><td><code>healthCheckGracePeriodSeconds</code> on the service</td><td><code>startPeriod</code> on the check itself (0 to 300 s, off by default)</td></tr>
+  <tr><td>Exists for</td><td>Only services behind a load balancer</td><td>Any task, including workers and sidecars</td></tr>
+</table></div>
+<p>Container check defaults: <code>interval</code> 30 s, <code>timeout</code> 5 s, <code>retries</code> 3.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters_ec2.html">[12]</a></sup> With both defined, a new task counts as healthy during a deployment only when it passes <em>both</em> (section 2).</p>
+<ul>
+<li><strong>When the container check is the only one you have:</strong> a queue worker like lesson 7's solve worker has no load balancer, so the ALB check doesn't exist for it. A container check (e.g. "has the worker loop updated a heartbeat file in the last minute?") is how ECS finds out the worker is stuck.</li>
+<li><strong>A common gotcha:</strong> the command runs <em>inside your image</em>. Slim Python images often don't include <code>curl</code>, so the check fails on a perfectly healthy app. Use a tool that's actually in the image, e.g. <code>python -c</code> with <code>urllib</code>.</li>
+<li><strong>Why the ALB check fails when the container check passes:</strong> usually the network, not the app. For example, the task's security group doesn't allow the ALB's security group in on port 8000 (lesson 3), or the target group's port or path is wrong.</li>
+</ul>
+<p><strong>Follow-up: is a container check only for APIs with <code>/health</code>? Do I build it into the app?</strong> It's <em>any</em> command that exits 0 for healthy, so it doesn't need HTTP. It's optional: with no <code>healthCheck</code>, ECS just doesn't check. But yes, you design it as part of the app, because the app has to give the check something meaningful to look at, and the image has to contain whatever the command runs.</p>
+<pre><code>API:    reuse /health      ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+Worker: heartbeat file     the loop touches /tmp/heartbeat on every pass
+        ["CMD-SHELL", "python -c \"import os,time,sys; sys.exit(time.time()-os.path.getmtime('/tmp/heartbeat') > 300)\""]</code></pre>
+<p>Make the threshold longer than your slowest job (here 5 minutes for solves of up to 4), or a busy worker looks stuck. And keep the check <strong>shallow</strong>: test "this process can do work" (model loaded, loop alive), not "the database answers". If <code>/health</code> fails whenever RDS has a blip, <em>every</em> task fails at once and ECS replaces them all, turning a small outage into a big one.<sup class="cite"><a href="https://aws.amazon.com/builders-library/implementing-health-checks/">[13]</a></sup></p>
+</details>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/">A deep dive into Amazon ECS task health and task replacement</a> (AWS Containers blog), which explains how ECS decides a task is healthy and when it replaces one. Then read <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">How the deployment circuit breaker detects failures</a>.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "what's the difference between the ALB health check and a container health check?", "can I roll back by hand?", "what happens to requests that are mid-flight on an old task?" or "when is blue/green worth paying for both versions?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> <a href="0007-scaling-a-service.html">Lesson 7, scaling a service</a>: Service Auto Scaling for the forecast API (target tracking on CPU or requests per task) and Scenario Lab workers that scale on SQS queue depth.</p>
+  <p>Cheat sheets: <a href="../reference/service-deployments.html">Service deployments</a> · <a href="../reference/running-jobs.html">Running jobs</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a> · <a href="../reference/ecs-building-blocks.html">Building blocks</a></p>
+  <p class="muted">Sources: [1] <a href="https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/">AWS blog: ECS task health and replacement</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html">ECS: deployment circuit breaker</a> · [3] <a href="https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_ecs.CfnService.html">CfnService: healthCheckGracePeriodSeconds</a> · [4] <a href="https://repost.aws/knowledge-center/elb-ecs-tasks-improperly-replaced">re:Post: tasks marked unhealthy and replaced</a> · [5] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html">ECS API: DeploymentConfiguration</a> · [6] <a href="https://repost.aws/knowledge-center/ecs-deploy-tasks-no-downtime">re:Post: deploying without downtime</a> · [7] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html#deregistration-delay">ALB: deregistration delay</a> · [8] <a href="https://repost.aws/knowledge-center/ecs-deployment-roll-back-failure">re:Post: why didn't my deployment roll back?</a> · [9] <a href="https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-ecs-built-in-linear-canary-deployments/">What's new: ECS linear and canary</a> · [10] <a href="https://aws.amazon.com/blogs/containers/gradual-deployments-in-amazon-ecs-with-linear-and-canary-strategies/">AWS blog: gradual deployments in ECS</a> · [11] <a href="https://repost.aws/knowledge-center/ecs-pull-container-error">re:Post: CannotPullContainerError</a> · [12] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters_ec2.html">ECS: task definition healthCheck parameters</a> · [13] <a href="https://aws.amazon.com/builders-library/implementing-health-checks/">Amazon Builders&#39; Library: implementing health checks</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/sequence.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

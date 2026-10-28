@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone Design Review</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0010-choosing-compute-and-cost.html">← Lesson 10</a> · Lesson 11 · <a href="../reference/design-review-checklist.html">Review checklist</a></nav>
+
+<h1>Capstone: design the agent assistant</h1>
+<p class="subtitle">You're the architect this time. Design it end to end, then we review it together.</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (45 to 60 minutes, split across sittings if you like)</strong>
+  A complete ECS design for a real agentic app, where you can justify every choice: its shape, networking, roles, deployments, scaling, images and secrets, debugging, and compute and cost. It's the mission's "design it on purpose" goal, done without a lesson to lean on.
+</div>
+
+<h2>How this works</h2>
+<ol>
+  <li><strong>Read the brief</strong> below.</li>
+  <li><strong>One part at a time.</strong> Write your answer to a single part from memory, in your own words. Bullet points, half-formed ideas and "I'm not sure, but maybe…" all count. This is practice, not an exam.</li>
+  <li><strong>Paste that part into the chat</strong> before you lock it in. I'll review just that part: what's solid, what's missing, and a hint for anything you got stuck on.</li>
+  <li><strong>Then lock it in</strong> to see the checklist, add anything you'd change in the second box, and move on to the next part when you're ready. One part per sitting is fine.</li>
+  <li><strong>After all eight parts:</strong> the first look at infrastructure as code, built from <em>your</em> reviewed design.</li>
+</ol>
+<p class="muted">There's no warm-up: the whole lesson is retrieval practice across lessons 1 to 10. Your answers are saved in this browser as you type, if it allows that.</p>
+
+<h2>The brief</h2>
+<div class="callout">
+  <strong>"Ask the data": an agentic data-exploration assistant</strong>
+  <p>A mid-size distributor's <strong>60 supply chain planners</strong> ask questions in plain English, like "why did DC-North stock out of SKU 4471 last week?" or "plot forecast vs actuals for the top 20 SKUs". A chat web app sends each message to your <strong>assistant API</strong>, which runs an agent loop:</p>
+  <ul>
+    <li>calls <strong>Claude on Amazon Bedrock</strong> to plan and write answers;</li>
+    <li>queries the <strong>planning database</strong>, a Postgres read replica on RDS in a private subnet;</li>
+    <li>calls a <strong>third-party web search API</strong> (on the internet, needs an API key) for things like supplier news;</li>
+    <li>runs <strong>Python analysis code that the LLM writes</strong> (pandas, plotly) to compute numbers and draw charts. This code is untrusted. A run takes up to 2 minutes and needs about 1 vCPU and 2 GB;</li>
+    <li>saves conversations and generated charts to <strong>S3</strong>.</li>
+  </ul>
+  <p><strong>Traffic:</strong> business hours in one time zone, a clear peak on Monday mornings. A chat reply takes 10 to 40 seconds, mostly waiting on the LLM, so CPU stays low. Roughly 600 code runs a day.</p>
+  <p><strong>Constraints:</strong> the data is commercially sensitive and must never be reachable from the internet. The team is two data scientists, with no dedicated ops person. They ship a new version weekly and don't want to drop chats in progress when they do. Budget-conscious. Region <code>eu-west-2</code>. No GPUs needed.</p>
+</div>
+
+<h2>Your design</h2>
+<div class="ws" data-ws="w-capstone"></div>
+<script type="application/json" id="w-capstone">
+{
+  "id": "capstone-agent-v1",
+  "sections": [
+    { "title": "Shape: which ECS pieces?",
+      "prompt": "List the task definitions, services and standalone tasks, and what each one does. In particular: where does the untrusted code run, and why there?",
+      "hint": "Think about lesson 1 (one business purpose per task definition), lesson 4 (job vs service) and lesson 7 (queue worker).",
+      "checklist": [
+        "The assistant API is a service behind a load balancer, with a min of 2 tasks.",
+        "Untrusted code runs in its own task definition, never as a sidecar in the API task: a sidecar would share the API's task role, network and localhost.",
+        "The sandbox choice is justified: one standalone task per run (strongest isolation, but each run waits for a task to start) or a pool of worker tasks fed by a queue (faster, but one task runs many users' code, so leftover files or state can leak between runs).",
+        "Somebody knows what happens to a code run that fails or times out: a stop timeout, an exit code the API checks, and a clear message back to the planner."
+      ] },
+    { "title": "Networking",
+      "prompt": "Sketch the network path from a planner's browser to the API, and from each task out to everything it calls. Which subnets, which security groups, which routes out?",
+      "hint": "Lesson 3: public ALB, private tasks, security group chaining, NAT vs VPC endpoints.",
+      "checklist": [
+        "The ALB is in public subnets; all tasks are in private subnets with no public IP.",
+        "Security groups are chained: the ALB's group may reach the API's port; the database's group accepts only the API's group on 5432.",
+        "The API's way out is explained: a NAT gateway for the third-party search API (it's on the internet), and VPC endpoints for Bedrock runtime, ECR, S3, Secrets Manager and CloudWatch Logs where possible.",
+        "The sandbox can't reach the internet or the database: its own security group, and no route out except what it needs (e.g. an S3 endpoint). Otherwise LLM-written code could send data out.",
+        "Long replies: 10 to 40 seconds fits the ALB's default 60-second idle timeout, but there isn't much room. Raise it or stream responses."
+      ] },
+    { "title": "Roles and secrets",
+      "prompt": "For each task definition: what's in its task role, what's in its execution role, and which secrets does it get, and how?",
+      "hint": "Lesson 2 (execution vs task role), lesson 8 (secrets, Bedrock without a key).",
+      "checklist": [
+        "Bedrock is called with the API's task role (bedrock:InvokeModel on the chosen model): no API key stored anywhere.",
+        "The API's task role covers only its own S3 prefix, and, if it launches sandbox runs, ecs:RunTask on the sandbox family plus iam:PassRole for exactly the sandbox's roles.",
+        "Secrets (search API key, database password from a JSON secret) live in Secrets Manager, are referenced in the API's secrets field, and are fetched by its execution role (secretsmanager:GetSecretValue).",
+        "The database user is read-only.",
+        "The sandbox gets no secrets, no database access and no Bedrock: at most, read its input and write its output under one S3 prefix.",
+        "Rotation is planned for: a force new deployment after rotating, or the app reads the secret at runtime."
+      ] },
+    { "title": "Deployments and health",
+      "prompt": "How does a weekly release reach production without dropping chats or shipping a broken version? Include health checks.",
+      "hint": "Lesson 6: rolling updates, grace period, deregistration delay, circuit breaker, alarms.",
+      "checklist": [
+        "Rolling update with min 100% / max 200%, so serving capacity never drops.",
+        "Deregistration delay longer than the longest reply (above 40 s; the 300 s default works but slows every deploy).",
+        "The API handles SIGTERM, and stopTimeout gives a chat in progress time to finish.",
+        "A shallow /health check, plus a health check grace period sized to real startup time.",
+        "Circuit breaker with rollback, plus a CloudWatch alarm (5xx rate or agent error rate) for releases that are healthy but wrong.",
+        "The sandbox's image or revision is updated deliberately, and the API is told which revision to run."
+      ] },
+    { "title": "Scaling and quotas",
+      "prompt": "How does the API scale, on which metric, within what range? How are sandbox runs kept from overwhelming the account?",
+      "hint": "Lesson 7 (metric choice, target tracking, scheduled scaling), lesson 5 (vCPU quota).",
+      "checklist": [
+        "The API scales on ALBRequestCountPerTarget, not CPU (it mostly waits on the LLM, so CPU stays low).",
+        "Min 2 (across two AZs) and a justified max. Scheduled scaling raises the minimum before the Monday-morning peak.",
+        "Sandbox concurrency is capped (queue + worker service max, or a limit in the API), and the cap fits the Fargate vCPU quota alongside the API's maximum.",
+        "If there's a sandbox worker pool: backlog per task, Container Insights on, visibility timeout longer than the longest run, scale-in protection while a run is in progress."
+      ] },
+    { "title": "Images",
+      "prompt": "How are the images stored, tagged, cleaned up and checked?",
+      "hint": "Lesson 8.",
+      "checklist": [
+        "One ECR repository per image (API, sandbox).",
+        "Immutable tags (date + git commit); the task definition references that tag, never latest.",
+        "Lifecycle rules that can't delete what's deployed: keep the newest N builds, expire untagged images; nothing in production relies on a tag that moves.",
+        "Enhanced scanning (Inspector): the images are full of Python packages, and the sandbox runs untrusted code, so CVEs in pandas and its dependencies matter.",
+        "The sandbox image contains only what analysis needs: no credentials, no extra tools."
+      ] },
+    { "title": "Observability and debugging",
+      "prompt": "What will you be able to see on day one, and how would you investigate 'the assistant got slow' and 'a code run failed'?",
+      "hint": "Lesson 9.",
+      "checklist": [
+        "awslogs for every container, one log group per app, a retention period set.",
+        "Each log line carries a conversation or run ID, so one chat can be followed across the API and the sandbox. Secrets and environment variables are never logged.",
+        "Container Insights (enhanced) on the cluster, and event capture on so failed sandbox tasks are still visible hours later.",
+        "ECS Exec allowed on the API as a break-glass tool only (task role ssmmessages permissions); off for the sandbox.",
+        "Where to look first is known: stoppedReason for runs that never started, exit codes and logs for runs that crashed."
+      ] },
+    { "title": "Compute and cost",
+      "prompt": "Which compute does each part run on, which architecture, and roughly what will it cost a month? Show your working.",
+      "hint": "Lesson 10. Prices (us-east-1, use them as rough eu-west-2 numbers): x86 $0.0405 per vCPU-hour, $0.0044 per GB-hour; ARM64 $0.0324 and $0.0036.",
+      "checklist": [
+        "Fargate for the sandbox, because each task gets its own isolated environment, which matters for untrusted code. Not Managed Instances, where tasks can share a host.",
+        "The API on regular Fargate, not Spot: an interruption would cut chats off mid-reply.",
+        "ARM64 considered (pandas, plotly and psycopg have ARM builds), with the image built for arm64 or multi-arch.",
+        "Express Mode considered for the API, and the decision justified (fast HTTPS ALB and scaling; check it fits private subnets and the custom task definition).",
+        "The arithmetic adds up. Sandbox ≈ 600 runs × up to 2 min × (1 vCPU + 2 GB) a day; API ≈ 2 small tasks for business hours or all month. And the estimate notes that the ALB, NAT gateway and VPC endpoints are probably bigger than the Fargate bill."
+      ] }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>Part 1: How does the frontend send a user's message to the API? Shouldn't the frontend be in a public subnet?</summary>
+<p><strong>Only the ALB is public.</strong> Every task, frontend included, sits in a private subnet with no public IP. The ALB is the one public door, and it reaches its targets on private IPs (lesson 3). "This container serves web pages" doesn't make it public.</p>
+<p>How the message travels depends on <strong>where the frontend's code runs</strong>:</p>
+<pre><code>A · Browser-side frontend (React, Vue: JavaScript running in the planner's browser)
+    The frontend service only hands out HTML and JS files. The BROWSER calls the API:
+    browser ──▶ public ALB ──/──────▶ frontend tasks   (page files)
+    browser ──▶ public ALB ──/api/*─▶ api tasks        (chat messages)
+    The frontend container never sees a chat message. That's the /api/* path rule.
+
+B · Server-side frontend (Streamlit, Gradio, Django, Next.js server)
+    The frontend's SERVER receives the message and calls the API itself, inside the VPC:
+    browser ──▶ public ALB ──▶ frontend tasks ──Service Connect──▶ api tasks
+                                 (private)       (or an internal ALB)  (private)</code></pre>
+<p>In B, the frontend needs a <strong>stable address</strong> for the API, because API tasks come and go, and their IPs change with them. Two ways to get one:</p>
+<ul>
+  <li><strong>ECS Service Connect (AWS's recommendation):</strong> the frontend just calls <code>http://assistant-api:8000</code>. ECS adds a small proxy container to each task that finds healthy API tasks and spreads requests across them, and it reports traffic metrics. No extra load balancer to pay for.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/networking-connecting-services.html">[1]</a></sup></li>
+  <li><strong>An internal ALB:</strong> a load balancer in private subnets with no public address. It works too, but it's one more thing to run and pay for.</li>
+</ul>
+<p>Either way, the <strong>security group</strong> is the permission, not the route: the API's group allows the frontend's group on port 8000. Traffic flows on private IPs inside the VPC, with no NAT involved.</p>
+<p class="muted">Most data-science chat UIs (Streamlit, Gradio) are case B.</p>
+<p><strong>Follow-up: is "only the ALB is public" an ECS rule?</strong> No, it's the recommended pattern, not something ECS enforces. You can give a task a public IP in a public subnet (lesson 3's cheapest way out, with no NAT), and it would work. The guide is: <em>only what must be reachable from the internet, or must reach it directly, goes in public subnets</em>. That's an internet-facing ALB and the NAT gateway itself. Everything else (frontend, API, workers, sandbox, database, internal ALB) goes in private subnets.</p>
+</details>
+
+<details class="qa">
+<summary>Part 1: How would a "pool of sandbox workers fed from a queue" work, step by step?</summary>
+<p>It's the lesson 7 solve worker, running code instead of a MILP:</p>
+<pre><code>Setup: a sandbox-worker SERVICE (e.g. min 2, max 10) and an SQS queue "sandbox-jobs".
+       Each worker task runs a loop and waits for messages.
+
+1. The API saves the LLM's code to S3: runs/{run_id}/code.py
+2. The API sends a message {"run_id": "..."} to sandbox-jobs
+3. A free worker receives it (hidden from others for the visibility timeout: set it above 2 min)
+4. The worker turns on scale-in protection
+5. The worker downloads code.py and runs it in a subprocess with a time limit
+6. The worker writes runs/{run_id}/result.json
+7. The worker deletes the message, wipes its working folder, turns protection off
+8. Meanwhile the API waits for result.json to appear in S3, then continues the chat
+9. Auto scaling watches backlog per task and adds workers when runs pile up</code></pre>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Task per run (your design)</th><th>Worker pool</th></tr>
+  <tr><td>Start delay</td><td>Every run waits for a task to start</td><td>None: workers are already running</td></tr>
+  <tr><td>Isolation</td><td>Fresh environment every run</td><td>One task runs many users' code, one after another. Leftover files, background processes or changed packages from one run can affect or spy on the next.</td></tr>
+  <tr><td>Cost</td><td>Pay only while runs execute</td><td>Pay for idle workers (at least the minimum)</td></tr>
+  <tr><td>Moving parts</td><td>RunTask, then wait for the task to stop</td><td>Queue, worker loop, protection, backlog scaling</td></tr>
+</table></div>
+<p><strong>A middle way:</strong> each worker runs <em>one</em> job, then exits. The service sees a task stop and starts a fresh one in the background, so a clean, warm worker is usually waiting. You get isolation like a task per run, with less of the waiting.</p>
+</details>
+
+<details class="qa">
+<summary>Part 1: How does the API start the sandbox task?</summary>
+<p>Through the ECS <code>RunTask</code> API. The CLI (<code>aws ecs run-task</code>) and boto3 (<code>ecs.run_task(...)</code>) are two clients of the same API. From the API's code:</p>
+<pre><code>resp = ecs.run_task(cluster="assistant", taskDefinition="sandbox:3",
+    launchType="FARGATE", networkConfiguration={...private subnets, sandbox SG...},
+    overrides={"containerOverrides": [{"name": "sandbox",
+        "environment": [{"name": "RUN_ID", "value": run_id}]}]})
+arn = resp["tasks"][0]["taskArn"]
+ecs.get_waiter("tasks_stopped").wait(cluster="assistant", tasks=[arn])   # then check exitCode</code></pre>
+<p>Because the API's code makes the call, the permission goes on the API's <strong>task role</strong>: <code>ecs:RunTask</code> on the sandbox family, plus <code>iam:PassRole</code> for the sandbox's roles. That's Part 3.</p>
+</details>
+
+<details class="qa">
+<summary>Part 1: The recommended shape, based on AWS best practices</summary>
+<div class="table-wrap"><table>
+  <tr><th>Piece</th><th>ECS shape</th><th>Why (best practice)</th></tr>
+  <tr><td><code>frontend</code> (Streamlit)</td><td>Service, min 2, behind the public ALB</td><td>Always on; one business purpose per task definition</td></tr>
+  <tr><td><code>assistant-api</code></td><td>Service, min 2, reached via Service Connect, not exposed to the internet</td><td>Always on; Service Connect is AWS's recommended way for services to call each other<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/networking-connecting-services.html">[1]</a></sup></td></tr>
+  <tr><td><code>sandbox</code></td><td>Task definition only; one standalone task per code run, started by the API with RunTask</td><td>Untrusted code needs strong isolation: on Fargate the task is the isolation boundary, and containers in one task share network and storage, so never a sidecar<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-fargate-ec2.html">[2]</a></sup><sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-security-considerations.html">[3]</a></sup></td></tr>
+</table></div>
+<p>Bedrock, Postgres, the search API and S3 are calls inside <code>assistant-api</code>, not pieces of their own. If waiting for each sandbox run to start becomes a problem, upgrade to a "one job, then exit" worker pool, and keep the isolation.</p>
+</details>
+
+<details class="qa">
+<summary>What is Service Connect? (New: not covered in lessons 1 to 10)</summary>
+<p><strong>The problem it solves:</strong> the frontend needs to call the API, but API tasks come and go (deployments, scaling, replacements), and each new task gets a new private IP. The frontend needs one name that always reaches a healthy API task.</p>
+<p><strong>What it is:</strong> an ECS feature that lets one service call another <strong>by a short name</strong>, like <code>http://assistant-api:8000</code>. ECS keeps the list of healthy tasks up to date and spreads requests across them.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect.html">[4]</a></sup></p>
+<pre><code>frontend task                                      assistant-api task
+┌───────────────────────────┐                      ┌───────────────────────────┐
+│ Streamlit                 │                      │ proxy  ──▶  FastAPI :8000 │
+│   │ http://assistant-api:8000                    │   ▲                       │
+│   ▼                       │   private IP, VPC    │   │                       │
+│ proxy (added by ECS) ─────┼──────────────────────┼───┘                       │
+└───────────────────────────┘                      └───────────────────────────┘</code></pre>
+<p>The proxy is a small container ECS adds to each task for you (a managed sidecar, lesson 1). It looks up which API tasks are healthy, picks one, retries around ones that fail, and reports request counts and errors as metrics.</p>
+<p><strong>Two settings:</strong></p>
+<pre><code>// assistant-api task definition: give the port a name
+"portMappings": [{ "name": "api", "containerPort": 8000, "appProtocol": "http" }]
+
+// assistant-api SERVICE ("client-server": it can be called)
+"serviceConnectConfiguration": { "enabled": true, "namespace": "assistant",
+  "services": [{ "portName": "api",
+                 "clientAliases": [{ "port": 8000, "dnsName": "assistant-api" }] }] }
+
+// frontend SERVICE ("client": it only calls others)
+"serviceConnectConfiguration": { "enabled": true, "namespace": "assistant" }</code></pre>
+<p>The <em>namespace</em> is the shared phone book both services join. ECS creates and manages it; treat it as a black box.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-concepts.html">[5]</a></sup></p>
+<ul>
+  <li><strong>Security groups still apply:</strong> the API's group must allow the frontend's group on 8000. Service Connect finds the tasks; security groups decide who may connect.</li>
+  <li><strong>ECS services only:</strong> it connects services to each other. Your standalone sandbox tasks aren't in it, and the public ALB still handles internet traffic.</li>
+  <li><strong>Changes take effect with a deployment:</strong> new settings reach new tasks, so turning it on means a new deployment of both services.</li>
+  <li><strong>The proxy uses a little CPU and memory</strong> in every task. Leave room for it when sizing.</li>
+</ul>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Service Connect</th><th>Internal ALB</th></tr>
+  <tr><td>Extra cost</td><td>None for the feature (some CPU/memory for the proxy)</td><td>An hourly load balancer charge</td></tr>
+  <tr><td>Address</td><td><code>http://assistant-api:8000</code></td><td>The ALB's DNS name</td></tr>
+  <tr><td>Who can use it</td><td>ECS services in the namespace</td><td>Anything in the VPC</td></tr>
+  <tr><td>AWS's advice for ECS-to-ECS calls</td><td>Recommended<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/networking-connecting-services.html">[1]</a></sup></td><td>Works, more to run</td></tr>
+</table></div>
+</details>
+
+<details class="qa">
+<summary>Part 2: Why do Bedrock, Secrets Manager, ECR and CloudWatch Logs need VPC endpoints? And does Postgres?</summary>
+<p><strong>Postgres: no.</strong> RDS already lives <em>inside</em> your VPC, with private IPs in your private subnets. The API reaches it directly; the database's security group is the only gate. VPC endpoints are for AWS services that live <em>outside</em> your VPC.</p>
+<p><strong>The others: yes, because the tasks are in private subnets.</strong> Bedrock, S3, Secrets Manager, ECR and CloudWatch Logs are AWS APIs with public addresses. A task in a private subnet has no route to a public address unless you give it one:</p>
+<div class="table-wrap"><table>
+  <tr><th>Way out</th><th>Covers</th><th>Notes</th></tr>
+  <tr><td>NAT gateway</td><td>Everything: AWS APIs and the third-party APIs</td><td>Needed anyway for search/weather. Charged per hour and per GB through it, so big image pulls and chatty logs add up.</td></tr>
+  <tr><td>S3 gateway endpoint</td><td>S3 only</td><td>Free. Always add it.</td></tr>
+  <tr><td>Interface endpoints</td><td>One AWS service each: <code>ecr.api</code>, <code>ecr.dkr</code>, <code>logs</code>, <code>secretsmanager</code>, <code>bedrock-runtime</code>…</td><td>Charged per hour per AZ. Traffic stays on the AWS network. <strong>Required</strong> for any task with no NAT route.</td></tr>
+</table></div>
+<p>Remember that on Fargate, pulling the image, fetching secrets and sending logs all go out through the <em>task's own</em> network interface, so they need a route too, and the task's security group must allow them.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/platform-version-migration.html">[6]</a></sup> For the API, NAT alone would work; endpoints keep the sensitive traffic off the internet path. For the sandbox, which should have <strong>no</strong> NAT route, the endpoints are the only way it can even start.</p>
+</details>
+
+<details class="qa">
+<summary>Part 2: Why does the sandbox need a security group if nothing connects to it?</summary>
+<p><strong>Every Fargate task gets a security group</strong>, because each task has its own network interface. You're right that its <em>inbound</em> rules should be empty. The important part is <strong>outbound</strong>: a new security group allows <em>all</em> outbound traffic by default.</p>
+<p>The sandbox runs code an LLM wrote, and an LLM can be tricked by a prompt into writing harmful code. With open outbound rules, that code could:</p>
+<ul>
+  <li>send your planning data to a server on the internet;</li>
+  <li>call the assistant API or other services inside the VPC;</li>
+  <li>try to reach the database (blocked only because the DB's group allows just the API's group).</li>
+</ul>
+<p><strong>Lock it down twice:</strong></p>
+<ol>
+  <li><strong>Subnets:</strong> run the sandbox in separate private subnets whose route table has <strong>no NAT route</strong>, so there's no path to the internet at all.</li>
+  <li><strong>Outbound rules:</strong> allow only HTTPS (443) to the VPC endpoints it needs (ECR and Logs, to start and to log) and to S3 through the gateway endpoint. Nothing else.</li>
+</ol>
+<p class="muted">One thing a security group can't block: the task's own credentials endpoint, which is how code inside any task gets its task role's credentials. That's why the sandbox's task role must be tiny (Part 3).</p>
+</details>
+
+<details class="qa">
+<summary>Part 2: What is the ALB's 60-second idle timeout, and why does it matter here?</summary>
+<p>A load balancer closes a connection if <strong>no data at all</strong> passes through it for 60 seconds (the default; you can set 1 to 4,000).<sup class="cite"><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html">[7]</a></sup> It doesn't matter that your code is still busy: the user just gets an error, and the work carries on with nobody waiting for it.</p>
+<p><strong>Why it matters for this app:</strong> a normal reply takes 10 to 40 seconds, which fits. A reply that includes a sandbox run doesn't: the task has to start, the code runs for up to 2 minutes, then the LLM writes the answer. That's easily 3 minutes with nothing sent back.</p>
+<p>In your design (B), the long wait sits on the frontend → API call, which goes through Service Connect. That has its own timeouts (an idle timeout, 5 minutes by default for HTTP, and a per-request timeout), so check those too.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_TimeoutConfiguration.html">[8]</a></sup> The public ALB still carries Streamlit's long-lived connection to each browser, so the 60-second timer applies there too.</p>
+<p><strong>The design fix: don't make one request wait minutes.</strong></p>
+<pre><code>1. frontend → POST /runs          API starts the work, replies at once: {"run_id": "r-42"}
+2. frontend → GET  /runs/r-42     every few seconds: {"status": "running"}  (UI: "Analysing…")
+3. frontend → GET  /runs/r-42     {"status": "done", "answer": …, "chart": "s3://…"}</code></pre>
+<p>Every request is short, so no timeout is ever close, and a deployment or a lost connection doesn't lose the work: the run's status lives in S3 or a small table, not in an open connection. Streaming the reply (sending bytes as they're produced) also resets idle timers. Raising the timeout is the blunt fix: it works, but it keeps connections open for minutes during deployments (Part 4).</p>
+</details>
+
+<details class="qa">
+<summary>Part 2: The recommended network design</summary>
+<pre><code>VPC, 2 Availability Zones (eu-west-2a, eu-west-2b); each row exists once per AZ
+
+public subnets           ALB (internet-facing) · NAT gateway
+private-app subnets      frontend tasks · assistant-api tasks · interface endpoints
+                         route 0.0.0.0/0 → NAT        (third-party APIs)
+private-sandbox subnets  sandbox tasks
+                         NO internet route; S3 gateway endpoint route only
+private-data subnets     RDS Postgres
+                         NO internet route</code></pre>
+<div class="table-wrap"><table>
+  <tr><th>Security group</th><th>Inbound</th><th>Outbound</th></tr>
+  <tr><td><code>sg-alb</code></td><td>443 from anywhere</td><td>8501 to <code>sg-frontend</code></td></tr>
+  <tr><td><code>sg-frontend</code></td><td>8501 from <code>sg-alb</code></td><td>8000 to <code>sg-api</code>; 443 to <code>sg-endpoints</code> and S3</td></tr>
+  <tr><td><code>sg-api</code></td><td>8000 from <code>sg-frontend</code></td><td>5432 to <code>sg-db</code>; 443 to <code>sg-endpoints</code> and S3; 443 to the internet (via NAT, for search/weather)</td></tr>
+  <tr><td><code>sg-sandbox</code></td><td><strong>none</strong></td><td>443 to <code>sg-endpoints</code> and S3 <strong>only</strong></td></tr>
+  <tr><td><code>sg-db</code></td><td>5432 from <code>sg-api</code></td><td>none needed</td></tr>
+  <tr><td><code>sg-endpoints</code></td><td>443 from <code>sg-frontend</code>, <code>sg-api</code>, <code>sg-sandbox</code></td><td>none needed</td></tr>
+</table></div>
+<div class="table-wrap"><table>
+  <tr><th>Endpoint</th><th>Used by</th><th>Why</th></tr>
+  <tr><td>S3 gateway (free)</td><td>all</td><td>Image layers, conversations, code and results</td></tr>
+  <tr><td><code>ecr.api</code>, <code>ecr.dkr</code></td><td>all</td><td>Pulling images; the sandbox can't start without them</td></tr>
+  <tr><td><code>logs</code></td><td>all</td><td>awslogs</td></tr>
+  <tr><td><code>secretsmanager</code></td><td>api</td><td>Search/weather keys, database password</td></tr>
+  <tr><td><code>bedrock-runtime</code></td><td>api</td><td>Claude calls stay off the internet path</td></tr>
+  <tr><td><code>ecs</code> (optional)</td><td>api</td><td>RunTask / DescribeTasks calls; otherwise they go out through NAT</td></tr>
+</table></div>
+<ul>
+  <li><strong>Long work:</strong> the async run pattern (POST /runs, then poll), so no request waits minutes. Keep the ALB idle timeout at the default unless Streamlit's connection needs more.</li>
+  <li><strong>NAT:</strong> one per AZ is resilient; one in total is cheaper but makes that AZ a single point of failure for outbound calls. A budget call to make on purpose.</li>
+  <li>8501 is Streamlit's default port; 8000 is the API's (lesson 3).</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>Part 2: The sandbox only runs Python. Why does it need endpoints at all?</summary>
+<p>Because the sandbox is a <strong>container</strong>, and a container needs its <strong>image</strong>. Two different things are involved:</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>The sandbox image</th><th>The LLM's code</th></tr>
+  <tr><td>What</td><td>Python, pandas, plotly, and your small "runner" script</td><td><code>code.py</code> for one question</td></tr>
+  <tr><td>Built by</td><td>You, once per release</td><td>The LLM, for every run</td></tr>
+  <tr><td>Lives in</td><td>ECR</td><td>S3: <code>runs/{run_id}/code.py</code></td></tr>
+</table></div>
+<p>Each RunTask starts a brand-new Fargate task, which pulls the image fresh. One run, step by step:</p>
+<pre><code>PENDING   pull the sandbox image        → ecr.api (log in, find the image)
+                                          ecr.dkr (fetch the image manifest)
+                                          S3      (the image's layers are stored there)
+RUNNING   runner downloads code.py      → S3
+          runs it, prints progress      → logs  (stdout to CloudWatch)
+          uploads result.json           → S3
+STOPPED   exits 0 or 1</code></pre>
+<p>That's all it needs: ECR, Logs and S3. No Secrets Manager, no Bedrock, no database, no internet. Without the ECR endpoints, the task never gets past PENDING.</p>
+</details>
+
+<details class="qa">
+<summary>Part 3: The recommended roles and secrets</summary>
+<p><strong>Rule from lesson 2:</strong> the <em>execution role</em> is used by ECS to get the task going and keep it running around your code (pull the image, send logs, fetch <code>secrets</code>). The <em>task role</em> is used by <strong>your code</strong> for the AWS calls it makes itself.</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Execution role (ECS uses it)</th><th>Task role (your code uses it)</th><th>Secrets</th></tr>
+  <tr><td><strong>frontend</strong></td><td>ECR pull, write logs</td><td>None needed: it only calls the API over the network (Service Connect is not an IAM call)</td><td>None</td></tr>
+  <tr><td><strong>assistant-api</strong></td><td>ECR pull, write logs, <code>secretsmanager:GetSecretValue</code> on its 3 secrets (+ <code>kms:Decrypt</code> if they use your own key)</td><td><code>bedrock:InvokeModel</code> on the chosen model · S3 read/write on <code>conversations/*</code> and <code>runs/*</code> · <code>ecs:RunTask</code> on the sandbox task definition · <code>ecs:DescribeTasks</code> · <code>iam:PassRole</code> on the sandbox's two roles</td><td>DB password (JSON key), search key, weather key. DB host in <code>environment</code></td></tr>
+  <tr><td><strong>sandbox</strong></td><td>ECR pull, write logs</td><td>S3 <code>GetObject</code>/<code>PutObject</code> on <code>runs/*</code> only</td><td>None</td></tr>
+</table></div>
+<ul>
+  <li><strong>Logs belong to the execution role</strong>: the awslogs driver sends them, not your code.</li>
+  <li><strong>No S3 permission is needed to pull from ECR</strong>: ECR permissions cover the layers, even though they're stored in S3. S3 needs a <em>network route</em> (the gateway endpoint), not an IAM permission.</li>
+  <li><strong>The database isn't an IAM permission</strong>: the API logs in with a username and password (a read-only user) over the network the security groups allow.</li>
+  <li><strong><code>iam:PassRole</code></strong>: when the API calls RunTask, it hands the sandbox's roles to ECS. IAM checks that the API is allowed to pass <em>those exact roles</em>. Without it, RunTask fails with AccessDenied.</li>
+  <li><strong>Rotation:</strong> force a new deployment after rotating, or read the secret at runtime (then the permission moves to the task role). For the DB password, rotate and redeploy together, or old tasks fail on new connections.</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>Part 3: How do I tell what needs a role, what needs a security group, and what needs both?</summary>
+<p>They're two separate gates, and they answer different questions:</p>
+<div class="table-wrap"><table>
+  <tr><th>Gate</th><th>Question it answers</th><th>Applies to</th><th>When it says no</th></tr>
+  <tr><td><strong>Network</strong> (routes + security groups)</td><td>Can the packets get there?</td><td>Every connection</td><td>Usually a <strong>timeout</strong></td></tr>
+  <tr><td><strong>IAM</strong> (a role)</td><td>Is this AWS API call allowed?</td><td>Only calls to AWS services</td><td><strong>AccessDenied</strong>, immediately</td></tr>
+</table></div>
+<p><strong>Three questions for any arrow in the diagram:</strong></p>
+<pre><code>1. Does a connection go from A to B?          → NETWORK, always
+     A's security group allows it out, B's allows it in,
+     and there's a route (local VPC, NAT, or a VPC endpoint)
+2. Is B an AWS service API?                   → IAM as well
+     (S3, Bedrock, ECS, ECR, Secrets Manager, CloudWatch Logs…)
+3. If IAM: who makes the call?
+     ECS, getting the task going (pull, logs, secrets)  → execution role
+     your code                                         → task role
+   If not AWS: the app's own login (password, API key), usually kept in Secrets Manager</code></pre>
+<div class="table-wrap"><table>
+  <tr><th>Arrow</th><th>Network</th><th>IAM</th><th>Other login</th></tr>
+  <tr><td>ALB → frontend</td><td>✓</td><td></td><td></td></tr>
+  <tr><td>frontend → API (Service Connect)</td><td>✓</td><td></td><td></td></tr>
+  <tr><td>API → Postgres</td><td>✓</td><td></td><td>DB password</td></tr>
+  <tr><td>API → search / weather</td><td>✓ (NAT)</td><td></td><td>API key</td></tr>
+  <tr><td>API → Bedrock, S3, RunTask</td><td>✓ (endpoint or NAT)</td><td>✓ task role</td><td></td></tr>
+  <tr><td>any task → ECR pull, logs</td><td>✓ (endpoint or NAT)</td><td>✓ execution role</td><td></td></tr>
+  <tr><td>API → Secrets Manager (at start)</td><td>✓ (endpoint or NAT)</td><td>✓ execution role</td><td></td></tr>
+  <tr><td>sandbox → S3</td><td>✓ (gateway endpoint)</td><td>✓ task role</td><td></td></tr>
+</table></div>
+<p>Calls to AWS services always need <strong>both</strong> gates. Everything else needs only the network, plus the app's own login if it has one. The symptom tells you which gate failed: a <em>timeout</em> points at the network, <em>AccessDenied</em> at IAM (lesson 9).</p>
+</details>
+
+<details class="qa">
+<summary>Part 3: What is iam:PassRole, and why does the API need it to call RunTask?</summary>
+<p><strong>The idea:</strong> some AWS calls ask a service to go and do work <em>while holding a role</em>. RunTask is one: "ECS, start a sandbox task, and give it the sandbox's task role and execution role." Handing a role to a service is called <strong>passing</strong> it, and IAM checks it separately.</p>
+<p><strong>Why the check exists:</strong> without it, anyone allowed to start tasks could start one holding a <em>more powerful</em> role than their own, and run code that uses it.</p>
+<pre><code>API task role:  can run tasks, can't touch the database admin secrets
+Attacker (a bug, or a prompt-injected agent) calls:
+  RunTask sandbox:3  with an override  taskRoleArn = AdminRole
+→ the new task holds AdminRole credentials → game over</code></pre>
+<p><code>iam:PassRole</code> closes that gap: the caller may hand over <strong>only the roles listed</strong>. Analogy: you may lend a visitor a badge only if it's on your list of badges you're allowed to lend.</p>
+<pre><code>{ "Effect": "Allow", "Action": "ecs:RunTask",
+  "Resource": "arn:aws:ecs:eu-west-2:111122223333:task-definition/sandbox:*" },
+{ "Effect": "Allow", "Action": "iam:PassRole",
+  "Resource": [ "arn:aws:iam::111122223333:role/sandbox-task-role",
+                "arn:aws:iam::111122223333:role/sandbox-execution-role" ],
+  "Condition": { "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" } } }</code></pre>
+<ul>
+  <li><strong>Both</strong> of the sandbox's roles are passed (task and execution), so both are listed.</li>
+  <li>Never <code>"Resource": "*"</code> for PassRole: that's exactly the escalation above.</li>
+  <li>The condition says these roles may be passed only to ECS tasks.</li>
+  <li>You've met this before: lesson 4's EventBridge Scheduler role needed <code>iam:PassRole</code> to start the nightly planner, for the same reason. So does whoever deploys a service.</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>Part 4: The recommended deployment and health design</summary>
+<p><strong>Three timers, often mixed up:</strong></p>
+<pre><code>task STARTS ──── healthCheckGracePeriodSeconds ───▶  (ALB failures ignored while the app loads)
+                 or the container check's startPeriod
+
+task LEAVES ──── deregistration delay ──▶ SIGTERM ──── stopTimeout ───▶ SIGKILL
+                 (ALB stops new requests,             (app finishes in-flight work;
+                  waits for in-flight ones)            max 120 s on Fargate)</code></pre>
+<div class="table-wrap"><table>
+  <tr><th></th><th>frontend (behind the ALB)</th><th>assistant-api (Service Connect, no ALB)</th></tr>
+  <tr><td>Strategy</td><td colspan="2">Rolling, min 100% / max 200%: new tasks start and pass checks before old ones stop</td></tr>
+  <tr><td>Health check</td><td>ALB target group check on Streamlit's health endpoint (<code>/_stcore/health</code> in recent versions)</td><td><strong>Container health check</strong> (e.g. <code>curl -f localhost:8000/health</code>): there's no ALB in front of it, so this is its only health check (lesson 6)</td></tr>
+  <tr><td>Startup allowance</td><td>Health check grace period</td><td>The container check's <code>startPeriod</code></td></tr>
+  <tr><td>Leaving</td><td>Deregistration delay a little above the longest request (e.g. 60 s, not the 300 s default)</td><td>Handle SIGTERM: stop taking new requests, finish current ones; <code>stopTimeout</code> ≈ 60 s</td></tr>
+  <tr><td>Safety nets</td><td colspan="2">Circuit breaker with rollback (tasks that don't start, crash or fail checks) + CloudWatch alarm rollback on 5xx / agent error rate ("healthy but wrong")</td></tr>
+</table></div>
+<ul>
+  <li><strong>Streamlit sessions live in the frontend task's memory</strong>, on a long-lived connection. When that task is replaced, the browser reconnects to a new task and that in-memory state is gone. Keep the conversation in S3 so the page can reload it, turn on ALB stickiness so a browser stays on one task, and release outside working hours.</li>
+  <li><strong>Sandbox runs survive API deployments</strong>: they're standalone tasks, not part of the service. With the async run pattern, the result lands in S3 and any new API task can serve the next poll.</li>
+  <li><strong>Sandbox releases:</strong> register <code>sandbox:N+1</code> first, then deploy the API with <code>SANDBOX_TASK_DEF=sandbox:N+1</code>. Name the exact revision, so you always know which code ran (lessons 5 and 8).</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>Parts 5 to 8: The recommended scaling, images, observability and cost</summary>
+<p><strong>5 · Scaling.</strong> The API has no ALB in front of it (Service Connect), so <code>ALBRequestCountPerTarget</code> isn't available for it. Scale it on <strong>requests per task from Service Connect's own metrics</strong> (<code>RequestCount</code>, published by the proxy)<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/proactive-scaling-of-amazon-ecs-services-using-amazon-ecs-service-connect-metrics/">[9]</a></sup>, or on a custom "active chats per task" metric. The frontend can use <code>ALBRequestCountPerTarget</code>. Both: min 2, a max you justify, and scheduled scaling that raises the minimum before Monday 08:00. The sandbox is standalone tasks, which have <strong>no desiredCount, min or max</strong> (scaling attaches only to services, lesson 7): cap concurrent runs in the API's code, and size the cap from demand and the vCPU quota. 600 runs × ~2.5 min over a ~9-hour day averages about 3 running at once, so a cap of 4 would queue at peaks; 8 to 10 is safer.</p>
+<p><strong>6 · Images.</strong> Three repositories (frontend, api, sandbox); <code>IMMUTABLE</code>; tags = date + git commit; task definitions name those tags. Lifecycle: expire <em>untagged</em> after 7 days + keep the newest 20 tagged builds. Never "anything older than 7 days" for tagged images: with weekly releases, that deletes the image a service is running, and the next scale-out fails with CannotPullContainerError (lesson 8). Enhanced scanning, especially for the sandbox. Build for ARM64 (or multi-arch) if you choose ARM.</p>
+<p><strong>7 · Observability.</strong> As your amended answer, plus: put <code>conversation_id</code> and <code>run_id</code> in every log line, and log how long each step takes (LLM call, SQL, sandbox start, sandbox run), so "it got slow" becomes "the sandbox start is slow". Store each run's task ARN with its run_id, so you can find its stopped reason and log stream. Set log retention.</p>
+<p><strong>8 · Compute and cost</strong> (rough, us-east-1 list prices; check eu-west-2):</p>
+<pre><code>Fargate (x86)
+  frontend  2 × (0.5 vCPU, 1 GB) × 720 h         ≈ $35
+  api       2 × (1 vCPU, 2 GB)   × 720 h         ≈ $71
+  sandbox   600 runs × 2 min × 30 = 600 h × $0.0493 ≈ $30   (upper bound)
+                                                  ≈ $136   (ARM64 ≈ $110)
+Network (fixed, whatever the traffic)
+  NAT gateway  1 × $0.045/h × 720                ≈ $32 + per-GB  (2 for resilience ≈ $65)
+  interface endpoints 5 × 2 AZs × ~$0.01/h × 720 ≈ $72
+  ALB                                           ≈ $16 + usage
+                                                 ≈ $120+
+Not counted: Bedrock tokens (likely the biggest line), RDS, CloudWatch Logs, Container Insights.</code></pre>
+<p>The network is about as big as the compute, which is common for small apps. Scheduled scaling to 1 task each overnight trims Fargate, at the cost of no spare task out of hours.</p>
+</details>
+
+<details class="qa">
+<summary>Does ECS create the ALB for me? Can the task definition put the ALB in public subnets and the tasks in private ones?</summary>
+<p><strong>No to both.</strong> The ALB is a separate resource (Elastic Load Balancing), and the task definition holds no subnets or load balancer settings at all. Three layers, three jobs (you saw the service part in <a href="0003-networking-for-fargate.html">lesson 3</a>):</p>
+<div class="table-wrap"><table>
+  <tr><th>Layer</th><th>Networking it holds</th></tr>
+  <tr><td><strong>Task definition</strong> (the blueprint)</td><td><code>networkMode: awsvpc</code> (how) and <code>portMappings</code> (8501). No subnets, no ALB.</td></tr>
+  <tr><td><strong>Service</strong></td><td><code>networkConfiguration</code>: <strong>private</strong> subnets, security group, <code>assignPublicIp: DISABLED</code> (where the tasks go). <code>loadBalancers</code>: which target group to register tasks in.</td></tr>
+  <tr><td><strong>ALB</strong> (separate resource)</td><td>Scheme <code>internet-facing</code>, its own <strong>public</strong> subnets (2+ AZs), its own security group, an HTTPS listener with a certificate, and a target group of type <code>ip</code>.</td></tr>
+</table></div>
+<pre><code>"networkConfiguration": { "awsvpcConfiguration": {
+    "subnets": ["subnet-private-app-a", "subnet-private-app-b"],
+    "securityGroups": ["sg-frontend"], "assignPublicIp": "DISABLED" } },
+"loadBalancers": [{ "targetGroupArn": "arn:…:targetgroup/frontend-tg/…",
+                    "containerName": "streamlit", "containerPort": 8501 }]</code></pre>
+<p>The public/private split happens because the ALB and the service each get <em>their own</em> subnets, linked only by the target group. <strong>Who creates the ALB:</strong> you (console, <code>aws elbv2</code>, or infrastructure as code). Three shortcuts create one for you: the ECS console's create-service screen can, Express Mode does (lesson 10), and CDK's <code>ApplicationLoadBalancedFargateService</code> does. All three still build the same separate ALB.</p>
+</details>
+
+<details class="qa">
+<summary>How does Scenario Lab's design differ from this capstone, and why?</summary>
+<p><strong>Same skeleton:</strong> frontend service → API service (Service Connect) → heavy work done elsewhere → results in S3 → the browser polls. <strong>Different engine for the heavy work</strong>, because the step 0 inputs differ:</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Agent assistant (capstone)</th><th>Scenario Lab</th></tr>
+  <tr><td>Heavy work</td><td>LLM-written Python, <strong>untrusted</strong></td><td>Your own MILP/forecast code, <strong>trusted</strong></td></tr>
+  <tr><td>Per request</td><td>One code run at a time, inside a chat</td><td>N scenarios at once (fan-out)</td></tr>
+  <tr><td>Dispatch</td><td>API calls <strong>RunTask</strong>, one standalone task per run</td><td>API sends <strong>N SQS messages</strong>; a worker service pulls them</td></tr>
+  <tr><td>Why</td><td>Fresh, isolated task per run, so nothing leaks between users</td><td>Reusing warm workers is safe and fast; the queue absorbs bursts</td></tr>
+  <tr><td>Scaling</td><td>No auto scaling: cap concurrent runs in the API's code</td><td>Worker service on backlog per task</td></tr>
+  <tr><td>Retries</td><td>API reads the exit code and decides</td><td>SQS redelivers after the visibility timeout; a dead-letter queue catches repeat failures</td></tr>
+  <tr><td>Compute</td><td>Regular Fargate (a user is waiting mid-chat)</td><td>Mostly <strong>Fargate Spot</strong> (retry-safe, nobody waits on one scenario)</td></tr>
+  <tr><td>Network</td><td>Sandbox in <strong>isolated</strong> subnets, outbound locked down</td><td>Workers in private subnets; reach SQS and S3 (endpoints or NAT); normal outbound rules</td></tr>
+  <tr><td>Roles</td><td>API: RunTask + PassRole. Sandbox: S3 <code>runs/*</code> only</td><td>API: SendMessage. Workers: Receive/Delete + S3. Compare: read results, write reports</td></tr>
+  <tr><td>Extra step</td><td>None</td><td><strong>Compare task</strong> (standalone) when all N results are in</td></tr>
+</table></div>
+<p><strong>The lesson:</strong> trust and volume decided the engine. Untrusted, one at a time → a fresh task per run. Trusted, many at once → a queue and a pool of workers. Everything around the engine stayed the same.</p>
+</details>
+
+<h2>After you send it</h2>
+<p>I'll reply with a review in three parts: <strong>solid</strong> (keep it), <strong>risky</strong> (what could go wrong, and how you'd notice), and <strong>questions I'd ask in the meeting</strong>. If an answer is missing or shaky, I'll point you to the lesson to revisit rather than just give you the answer.</p>
+<p>Then we'll write the first piece of infrastructure as code for your design, and add the condensed checklist to your <a href="../reference/design-review-checklist.html">review checklist</a>, which you can reuse for any future ECS app.</p>
+
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-best-practices.html">Amazon ECS best practices</a> (AWS). After you've written your design, compare it with AWS's own recommendations on security, networking and scaling. Reading it afterwards shows you what to fix; reading it first would just give you something to copy.
+</div>
+
+<div class="ask">
+  Stuck on a part? Ask me a <em>question</em> rather than for the answer. For example: "what are the options for running untrusted code?" or "how does the API start a task?" I'll give you a hint and point you to the right lesson.
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> the design review in chat, then infrastructure as code for your design. After that, the optional hands-on lessons once you have an AWS account.</p>
+  <p>Cheat sheets: <a href="../reference/ecs-building-blocks.html">Building blocks</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/running-jobs.html">Running jobs</a> · <a href="../reference/service-deployments.html">Deployments</a> · <a href="../reference/service-scaling.html">Scaling</a> · <a href="../reference/images-and-secrets.html">Images and secrets</a> · <a href="../reference/debugging-playbook.html">Debugging</a> · <a href="../reference/compute-and-cost.html">Compute and cost</a> (use them <em>after</em> you've locked in your answers)</p>
+</footer>
+</main>
+<script src="../assets/worksheet.js" defer></script>
+</body>
+</html>

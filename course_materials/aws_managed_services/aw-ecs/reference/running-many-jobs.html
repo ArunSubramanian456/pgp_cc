@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Many Jobs</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0005-running-many-jobs.html">From lesson 5</a> · <a href="running-jobs.html">Running jobs</a> · <a href="fargate-networking.html">Networking</a> · <a href="task-definition-fields.html">Task definition fields</a> · <a href="ecs-building-blocks.html">Building blocks</a></nav>
+<h1>Running many jobs on Fargate</h1>
+<p class="subtitle">Choosing a shape, concurrency from quota, Step Functions Map, Spot and idempotency.</p>
+
+<h2>Pick the shape</h2>
+<div class="table-wrap"><table>
+  <tr><th>Shape</th><th>Use when</th></tr>
+  <tr><td>RunTask loop</td><td>A handful of jobs. You'd own retries, limits and tracking yourself</td></tr>
+  <tr><td>Step Functions Map + <code>ecs:runTask.sync</code></td><td>A batch with a known end, followed by a step that needs all the results</td></tr>
+  <tr><td>SQS + worker service</td><td>A continuous stream of requests; scale on backlog (lesson 6)</td></tr>
+</table></div>
+<p><code>count</code> (≤ 10) starts <em>identical</em> copies with the same overrides, so it's no use for different scenarios.</p>
+
+<h2>Limits to plan around</h2>
+<ul>
+  <li><strong>Fargate vCPU quota</strong>: concurrent vCPUs per account and Region, with separate On-Demand and Spot quotas. The new-account On-Demand default is 6. Check it in Service Quotas before the first run. <a href="https://docs.aws.amazon.com/general/latest/gr/eks.html">docs</a></li>
+  <li><strong>Launch rate</strong>: Fargate RunTask is limited to 20 calls per second. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/throttling.html">docs</a></li>
+  <li><strong>Max at once</strong> = (quota − other usage) ÷ vCPU per task.</li>
+  <li><strong>Inline Map</strong>: a hard ceiling of 40 concurrent (MaxConcurrency can only go lower), ≤ 25,000 history events, input ≤ 256 KiB. Beyond any of these, use <strong>Distributed</strong> (≤ 10,000 child executions). <a href="https://docs.aws.amazon.com/step-functions/latest/dg/state-map.html">docs</a></li>
+  <li><strong>Payloads</strong>: Step Functions state input and output ≤ 256 KiB. Shrink each iteration's <code>Output</code> to <code>{id, status}</code>.</li>
+  <li><strong>Overrides</strong> ≤ 8,192 characters, so pass IDs and keep the real inputs in S3.</li>
+</ul>
+
+<div class="grid">
+  <div class="card">
+    <h3>Map iteration checklist</h3>
+    <ul>
+      <li><code>.sync</code> so the iteration waits for the task to stop</li>
+      <li>Pinned <code>TaskDefinition</code> revision for the whole run</li>
+      <li><code>MaxConcurrency</code> set from your quota</li>
+      <li>Retry <code>ECS.AmazonECSException</code> / <code>AmazonECS.Unknown</code> (launch) with backoff</li>
+      <li>Retry <code>States.TaskFailed</code> a couple of times (e.g. Spot). Test how exit codes map to errors</li>
+      <li><strong>Catch</strong> <code>States.ALL</code> per iteration, so one failure can't fail the whole Map</li>
+    </ul>
+    <p>Parameters are PascalCase. A non-empty <code>failures</code> list fails the state with <code>AmazonECS.Unknown</code>. <a href="https://docs.aws.amazon.com/step-functions/latest/dg/connect-ecs.html">docs</a></p>
+  </div>
+  <div class="card">
+    <h3>Fargate Spot</h3>
+    <ul>
+      <li>Two-minute warning: a task state change event plus SIGTERM</li>
+      <li><code>stopCode: TerminationNotice</code>, "Your Spot Task was interrupted."</li>
+      <li><code>stopTimeout</code> ≤ 120 s to use the warning</li>
+      <li>No automatic fallback to on-demand. Add a Catch path for that if you need it</li>
+    </ul>
+    <p><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html">docs</a></p>
+  </div>
+</div>
+
+<h2>Idempotent jobs</h2>
+<ul>
+  <li>Output key = f(run_id, scenario_id), so a retry overwrites rather than duplicates.</li>
+  <li>Write the result last, in one PUT. Exit 0 only after it succeeds.</li>
+  <li>Long solves: checkpoint the incumbent to S3 and warm-start the retry.</li>
+  <li>The final step reconciles results against a manifest and marks gaps as <code>MISSING</code>.</li>
+</ul>
+
+<h2>Run folder layout</h2>
+<pre><code>runs/&lt;run_id&gt;/manifest.json        revision, image tag, settings, scenario ids
+runs/&lt;run_id&gt;/baseline/result.json
+runs/&lt;run_id&gt;/scenarios/&lt;id&gt;.json   inputs
+runs/&lt;run_id&gt;/results/&lt;id&gt;.json     outputs
+runs/&lt;run_id&gt;/comparison.csv</code></pre>
+</main>
+</body>
+</html>

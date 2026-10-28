@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Debugging Tasks</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0008-images-and-secrets.html">← Lesson 8</a> · Lesson 9 · <a href="../reference/debugging-playbook.html">Cheat sheet</a></nav>
+
+<h1>Debugging and observability</h1>
+<p class="subtitle">When a task won't start, or starts and misbehaves: where the evidence is, and how to read it</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  Given the error from a stopped task, you can name the most likely cause and where to look next, without guessing. You also know how to see inside a running task when the logs aren't enough.
+</div>
+
+<h2>Warm-up</h2>
+<p>From lessons 4 to 8. Answer from memory before you click. Read each question carefully.</p>
+<div class="quiz" data-quiz="q-warmup9"></div>
+<script type="application/json" id="q-warmup9">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "You push a new image as :latest. The nightly planner (a standalone task) and the forecast API (a service) both use :latest. Nothing else changes. Which runs the new code first?",
+      "options": ["The forecast API, within an hour", "The planner, at its next run", "Both, as soon as push finishes", "Neither until you register new revisions"], "answer": 1,
+      "why": "A standalone task looks the tag up every time it starts. The service pinned its digest at deployment, so it keeps the old image until a new deployment (lesson 8)." },
+    { "q": "The inference API's OTel collector sidecar is marked essential: false, and it crashes. What happens to the task?",
+      "options": ["ECS stops the whole task", "It keeps running without telemetry", "The service replaces the task", "The circuit breaker rolls back"], "answer": 1,
+      "why": "Only an essential container's exit stops the task. The API keeps serving, and the telemetry quietly stops. Section 6 fixes that." },
+    { "q": "The nightly planner stops with exit code 137. What's the most likely cause?",
+      "options": ["Its image tag was missing", "It finished its solve successfully", "It ran out of memory", "Its Python code raised errors"], "answer": 2,
+      "why": "137 means SIGKILL, and the usual reason is going over the memory limit (lesson 4). A Python exception exits with 1." },
+    { "q": "The agent's search API key was rotated an hour ago. Running tasks still use the old key. Why?",
+      "options": ["Secrets Manager caches keys for hours", "The task role blocks new versions", "Rotation needs a new image tag", "Secrets are injected only at start"], "answer": 3,
+      "why": "ECS fetches secrets when the container starts. Force a new deployment to get the new value (lesson 8)." },
+    { "q": "The solve worker's backlog-per-task scaling shows no data at all. What's switched off?",
+      "options": ["Container Insights on the cluster", "Tag immutability on the repository", "Scale-in protection on the tasks", "The health check grace period"], "answer": 0,
+      "why": "RunningTaskCount comes from Container Insights. No data, no scaling (lesson 7). You'll meet Container Insights properly in section 5." }
+  ]
+}
+</script>
+
+<h2>1 · Ask "did my code run?" first</h2>
+<p>You know the task lifecycle from lesson 4. Each stage leaves evidence in a different place, so the first question is always: <strong>how far did the task get?</strong></p>
+
+<figure>
+<svg viewBox="0 0 640 210" role="img" aria-label="Task lifecycle from PROVISIONING to STOPPED, with where evidence lives at each stage: service events before placement, stoppedReason before your code runs, exit code and logs once it ran, metrics and ECS Exec while running.">
+  <style>
+    .box{fill:var(--card);stroke:var(--rule);stroke-width:1.5}
+    .t{fill:var(--fg);font:600 13px var(--mono)}
+    .l{fill:var(--muted);font:13px var(--serif)}
+    .y{fill:var(--you);font:600 13px var(--serif)}
+    .w{fill:var(--aws);font:600 13px var(--serif)}
+    .ln{stroke:var(--muted);stroke-width:1.5;fill:none}
+  </style>
+  <rect class="box" x="10" y="20" width="140" height="44" rx="6"/><text class="t" x="80" y="47" text-anchor="middle">PROVISIONING</text>
+  <rect class="box" x="170" y="20" width="140" height="44" rx="6"/><text class="t" x="240" y="47" text-anchor="middle">PENDING</text>
+  <rect class="box" x="330" y="20" width="140" height="44" rx="6"/><text class="t" x="400" y="47" text-anchor="middle">RUNNING</text>
+  <rect class="box" x="490" y="20" width="140" height="44" rx="6"/><text class="t" x="560" y="47" text-anchor="middle">STOPPED</text>
+  <path class="ln" d="M150 42h20M310 42h20M470 42h20"/>
+  <text class="l" x="80" y="88" text-anchor="middle">network interface</text>
+  <text class="l" x="240" y="88" text-anchor="middle">pull image, fetch secrets</text>
+  <text class="l" x="400" y="88" text-anchor="middle">your code runs</text>
+  <path class="ln" d="M10 110h300" stroke-dasharray="4 3"/>
+  <text class="w" x="160" y="132" text-anchor="middle">Before your code: no app logs</text>
+  <text class="l" x="160" y="152" text-anchor="middle">→ stoppedReason, service events</text>
+  <path class="ln" d="M330 110h300" stroke-dasharray="4 3"/>
+  <text class="y" x="480" y="132" text-anchor="middle">Your code ran</text>
+  <text class="l" x="480" y="152" text-anchor="middle">→ exit code + logs if it crashed</text>
+  <text class="l" x="480" y="172" text-anchor="middle">→ metrics + ECS Exec if it's alive</text>
+</svg>
+<figcaption>Empty logs are a clue, not a dead end: they usually mean the task failed before your code started.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+  <tr><th>How far did it get?</th><th>Look at</th></tr>
+  <tr><td>A service can't start tasks at all</td><td>The service's <strong>events</strong> (the console's Events tab, or <code>describe-services</code>). A healthy service ends with "has reached a steady state".</td></tr>
+  <tr><td>Started, stopped before your code ran</td><td>The stopped task's <strong><code>stopCode</code></strong> and <strong><code>stoppedReason</code></strong> (section 3)</td></tr>
+  <tr><td>Your code ran and exited</td><td>The container's <strong>exit code</strong>, then its <strong>logs</strong> (section 2)</td></tr>
+  <tr><td>Running, but slow or wrong</td><td><strong>Metrics</strong> (section 5), then a shell inside it with <strong>ECS Exec</strong> (section 6)</td></tr>
+</table></div>
+<p class="muted">A standalone task (like the planner) has no service events, so go straight to the stopped task.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-run-task-cluster">[1]</a></sup></p>
+
+<h2>2 · Logs: what your code printed</h2>
+<p>App: the <strong>inference API with an OTel collector sidecar</strong>. Whatever a container writes to stdout and stderr goes to CloudWatch Logs through the <code>awslogs</code> driver. The execution role does the sending (lesson 2). Explain each part, then click.</p>
+
+<div class="anno">
+<pre><code>"logConfiguration": {
+  "logDriver": "awslogs",
+  "options": {
+    <span class="a" data-k="group">"awslogs-group": "/ecs/inference-api",</span>
+    "awslogs-region": "eu-west-2",
+    <span class="a" data-k="prefix">"awslogs-stream-prefix": "ecs",</span>
+    <span class="a" data-k="mode">"mode": "non-blocking",
+    "max-buffer-size": "25m"</span>
+  }
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="group"><b>Log group</b>: one per app is a good habit. Set a retention period on it, or logs are kept forever and you keep paying for them.</div>
+  <div data-k="prefix"><b>Stream prefix</b>: each container in each task gets its own stream, named <code>ecs/&lt;container name&gt;/&lt;task ID&gt;</code>. That's how you find one task's logs: take the task ID from the stopped task and open the matching stream. On Fargate, the prefix is required.</div>
+  <div data-k="mode"><b>Delivery mode</b>: if CloudWatch can't keep up, should your app wait, or should logs be dropped? <code>blocking</code> makes writes to stdout wait, which can freeze the app until its health check fails. <code>non-blocking</code> keeps logs in a memory buffer and drops them if it fills. Since June 2025, <strong>non-blocking is the default</strong>: ECS chose availability over completeness.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_LogConfiguration.html">[2]</a></sup> AWS's tests suggest a 25 MB buffer.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/preventing-log-loss-with-non-blocking-mode-in-the-awslogs-container-log-driver/">[3]</a></sup></div>
+</div>
+</div>
+
+<h2>3 · Reading a stopped task</h2>
+<p>The nightly MILP planner didn't produce a plan. Its stopped task, from <code>aws ecs describe-tasks</code> (shortened):</p>
+
+<div class="anno">
+<pre><code>{
+  "lastStatus": "STOPPED",
+  <span class="a" data-k="code">"stopCode": "TaskFailedToStart",</span>
+  <span class="a" data-k="reason">"stoppedReason": "ResourceInitializationError: unable to pull secrets or registry auth:
+    execution resource retrieval failed: unable to retrieve secret from asm: …
+    AccessDeniedException: … is not authorized to perform: secretsmanager:GetSecretValue …",</span>
+  "containers": [{
+    "name": "planner",
+    <span class="a" data-k="exit">"lastStatus": "STOPPED"</span>
+  }]
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="code"><b><code>stopCode</code></b>: the broad category. <code>TaskFailedToStart</code> means it never reached your code. Compare <code>EssentialContainerExited</code> (your code ran, then the essential container stopped) and <code>SpotInterruption</code> (lesson 5).</div>
+  <div data-k="reason"><b><code>stoppedReason</code></b>: the detail. It starts with an error category, here <code>ResourceInitializationError</code>, and the rest says what failed: the execution role isn't allowed to read the secret (lesson 8). ECS lists the categories, each with its own troubleshooting page.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-error-codes.html">[4]</a></sup></div>
+  <div data-k="exit"><b>No <code>exitCode</code></b>: the container never started, so there's nothing to exit with, and no log stream either. When your code <em>did</em> run, each container shows an <code>exitCode</code> here (0, 1, 137, 143 from lesson 4).</div>
+</div>
+</div>
+
+<div class="callout">
+  <strong>Stopped tasks disappear after about an hour</strong>
+  <code>describe-tasks</code> and the console show stopped tasks for only about an hour.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/resolve-stopped-errors.html">[5]</a></sup> The planner fails at 02:00; you look at 09:00; it's gone. Fix: turn on <strong>event capture</strong> in the cluster's settings. ECS then keeps task and service events for a retention period you choose, in an <em>Event History</em> tab you can filter by stop code or exit code.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/troubleshooting-containerized-workloads-with-amazon-ecs-events-in-the-aws-console/">[6]</a></sup> It's the same task state change events you sent to SNS in lesson 4.
+</div>
+
+<h2>4 · The "won't start" playbook</h2>
+<p>Most failures fall into a handful of patterns, and you've met every cause in an earlier lesson. Match the text, then check the place in the last column.</p>
+<div class="table-wrap"><table>
+  <tr><th>You see</th><th>Most likely cause</th><th>Check</th></tr>
+  <tr><td><code>CannotPullContainerError</code> … <code>not found</code></td><td>The tag or digest isn't in ECR: a typo, a push that hadn't finished, or a cleanup rule deleted it</td><td>The image URI vs the repository (lessons 6, 8)</td></tr>
+  <tr><td><code>CannotPullContainerError</code> or <code>ResourceInitializationError</code> … <code>i/o timeout</code></td><td>No network path to ECR or Secrets Manager</td><td>Public IP, NAT or VPC endpoints for the task's subnets (lesson 3)<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-unable-to-pull-secrets">[7]</a></sup></td></tr>
+  <tr><td><code>ResourceInitializationError</code> … <code>AccessDeniedException</code></td><td>The execution role is missing a permission</td><td>Execution role policy (lessons 2, 8)</td></tr>
+  <tr><td><code>EssentialContainerExited</code>, exit code <code>1</code></td><td>Your code crashed</td><td>The container's log stream</td></tr>
+  <tr><td>Exit code <code>137</code>, <code>OutOfMemoryError</code></td><td>Out of memory</td><td>Task or container memory, memory metrics</td></tr>
+  <tr><td>Reaches <code>RUNNING</code>, then replaced again and again; service events mention failed health checks</td><td>Health check fails, often during a slow model load</td><td>Health check path, grace period or <code>startPeriod</code> (lesson 6)</td></tr>
+</table></div>
+<p class="muted">On a service, repeated failures like these trip the deployment circuit breaker (lesson 6), so you'll often first notice them as a failed deployment.</p>
+
+<h2>5 · Container Insights: metrics</h2>
+<p>When a task is running but slow, you need numbers. <strong>Container Insights</strong> is a cluster setting, <code>containerInsights</code>, with three values: <code>disabled</code>, <code>enabled</code> and <code>enhanced</code>. It collects CPU, memory, disk and network use for the cluster, each service and each task. <code>enhanced</code> (released December 2024) adds per-container detail and curated dashboards, and AWS recommends it.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/cloudwatch-container-insights.html">[8]</a></sup> It costs extra (CloudWatch pricing).</p>
+<ul>
+  <li>It's where <code>RunningTaskCount</code> comes from: your queue workers' scaling needs it (lesson 7).</li>
+  <li>Use it to size tasks. If the inference API's memory creeps up through the day and tasks die with 137 every evening, you've found a leak, or a task that's too small.</li>
+  <li>It reports only tasks that are <code>RUNNING</code>. A task that never starts sends no metrics, so for "won't start", go back to section 3.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/cloudwatch-container-insights.html">[8]</a></sup></li>
+</ul>
+
+<h2>6 · Inside a running task: ECS Exec</h2>
+<p>The inference API is running and healthy, but traces never arrive. Is the app sending to the collector at all? You want a shell inside the task to check. There's no SSH on Fargate, and you don't open inbound ports. <strong>ECS Exec</strong> gives you a shell through AWS Systems Manager, with no ports to open and no keys to manage.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">[9]</a></sup></p>
+
+<div class="anno">
+<pre><code><span class="a" data-k="on">aws ecs update-service --cluster ml --service inference-api \
+  --enable-execute-command --force-new-deployment</span>
+
+<span class="a" data-k="run">aws ecs execute-command --cluster ml --task 3f9c… \
+  --container app --interactive --command "/bin/sh"</span>
+
+<span class="a" data-k="inside"># inside the app container
+curl -s localhost:13133      # is the collector's health endpoint answering?</span></code></pre>
+<div class="anno-notes">
+  <div data-k="on"><b>Turn it on</b>: it's off by default, and only <strong>new</strong> tasks get it. That's why <code>--force-new-deployment</code> is there: the running tasks are replaced by ones with Exec enabled.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">[9]</a></sup> For a standalone task, pass <code>--enable-execute-command</code> to <code>run-task</code>.</div>
+  <div data-k="run"><b>Run a command</b>: pick the task and, since there are two containers, the container. You need the Session Manager plugin installed on your own machine. Inside the task, the SSM agent needs the <strong>task role</strong> (not the execution role) to have the <code>ssmmessages</code> permissions, and a private subnet with no NAT needs an <code>ssmmessages</code> VPC endpoint (lesson 3 again).<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">[9]</a></sup></div>
+  <div data-k="inside"><b>Inside</b>: the containers in a task share <code>localhost</code> (lesson 1), so from the app container you can test the sidecar directly. 13133 is the OTel collector's usual health-check port. Your shell runs as <strong>root</strong>, sessions end after 20 idle minutes, and each <code>ExecuteCommand</code> is recorded in CloudTrail.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">[9]</a></sup></div>
+</div>
+</div>
+
+<div class="callout">
+  <strong>Not everywhere: the agent code sandbox</strong>
+  The agent code sandbox runs untrusted, LLM-written code, so it's locked down. ECS Exec needs a writable root filesystem (it doesn't work with <code>readonlyRootFilesystem</code>) and a task role with extra permissions, and both weaken that lockdown.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">[9]</a></sup> Leave it off there, and debug from logs. Treat Exec as a break-glass tool, turned on where you need it.
+</div>
+
+<h3>Bringing a dead sidecar back</h3>
+<p>Remember the warm-up: a crashed non-essential collector leaves the API serving with no telemetry, and nothing looks wrong. A <strong>container restart policy</strong> lets ECS restart just that container, without replacing the task. It works for essential and non-essential containers.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/best-practices-for-resilience-and-availability-on-amazon-ecs/">[10]</a></sup></p>
+<pre><code>"restartPolicy": {
+  "enabled": true,
+  "ignoredExitCodes": [0],
+  "restartAttemptPeriod": 300
+}</code></pre>
+<p><code>ignoredExitCodes</code>: exits that shouldn't trigger a restart. A clean exit (0) isn't a crash. By default, every exit code triggers one. <code>restartAttemptPeriod</code>: how long the container must have run before ECS will restart it, from 60 to 1,800 seconds (default 300).</p>
+<p class="muted">The attempt period stops restart loops: a container that crashes within its first 300 seconds isn't restarted, because that points to a real bug, not a passing glitch.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerRestartPolicy.html">[11]</a></sup></p>
+
+<h2>Practice: diagnose it</h2>
+<div class="quiz" data-quiz="q-debug"></div>
+<script type="application/json" id="q-debug">
+{
+  "title": "What do you check first?",
+  "intro": "Each question gives you what you'd see. Pick the most likely cause or next step.",
+  "shuffle": true,
+  "questions": [
+    { "q": "stoppedReason: CannotPullContainerError: … forecast:v8 … not found",
+      "options": ["The task role lacks permissions", "The tag isn't in ECR", "The health check is failing", "Memory is set too low"], "answer": 1,
+      "why": "\"not found\" means ECR has no image under that tag or digest: a typo, an unfinished push, or a cleanup rule." },
+    { "q": "ResourceInitializationError: … unable to retrieve ecr registry auth … dial tcp …:443: i/o timeout",
+      "options": ["The image tag was overwritten", "The container health check failed", "No network route to ECR", "The execution role lacks GetSecretValue"], "answer": 2,
+      "why": "A timeout means nothing answered: the task's subnet has no public IP, NAT or ECR endpoints (lesson 3). A permission problem would say AccessDenied." },
+    { "q": "ResourceInitializationError: … AccessDeniedException … not authorized to perform: secretsmanager:GetSecretValue",
+      "options": ["The execution role's IAM policy", "The task role's IAM policy", "The VPC endpoint for ECR", "The security group inbound rules"], "answer": 0,
+      "why": "Secrets are fetched before your code runs, by the execution role." },
+    { "q": "stopCode EssentialContainerExited, exit code 1. The log stream ends with ModuleNotFoundError: No module named 'ortools'.",
+      "options": ["Raise the task memory size", "Give the task role access", "Add a NAT gateway route", "Rebuild the image with ortools"], "answer": 3,
+      "why": "Your code ran and crashed on import: the solver library isn't in the image. Exit 1 plus a traceback means it's your code or your image, not AWS." },
+    { "q": "The forecast API's tasks reach RUNNING, then are replaced every few minutes. Service events mention failed ELB health checks. The model takes 3 minutes to load.",
+      "options": ["Raise the target group deregistration delay", "Raise the health check grace period", "Give the execution role more permissions", "Lower the service's minimum healthy percent"], "answer": 1,
+      "why": "The load balancer checks before the model is ready. The grace period tells ECS to ignore those early failures (lesson 6)." },
+    { "q": "The 02:00 planner run failed. At 09:00, describe-tasks can't find the stopped task. Why?",
+      "options": ["Failed tasks are deleted after retry", "Stopped tasks are kept one hour", "ECS only records tasks that ran", "describe-tasks never shows failed standalone tasks"], "answer": 1,
+      "why": "Stopped tasks are visible for about an hour. Turn on event capture (or route task state change events somewhere) to keep the history." },
+    { "q": "You ran update-service --enable-execute-command, without forcing a new deployment. execute-command on a running task still fails. Why?",
+      "options": ["Fargate doesn't support ECS Exec", "The execution role needs SSM", "Only new tasks get Exec", "The ALB blocks shell sessions"], "answer": 2,
+      "why": "ECS Exec can't be turned on for existing tasks. Force a new deployment so new tasks start with it. (And the permissions belong on the task role, not the execution role.)" },
+    { "q": "The OTel sidecar crashes now and then after hours of running, and comes back fine. How do you recover it without replacing the task?",
+      "options": ["Mark the sidecar as essential", "Turn on Container Insights enhanced", "Add a container restart policy", "Enable ECS Exec and restart"], "answer": 2,
+      "why": "A restart policy restarts just that container. Making it essential would do the opposite: every sidecar crash would stop the whole task." }
+  ]
+}
+</script>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://repost.aws/knowledge-center/ecs-task-stopped">Why has my Amazon ECS task stopped?</a> (AWS re:Post knowledge center). A short, practical walk through stopped reasons and exit codes. Keep <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-error-codes.html">Amazon ECS stopped tasks error messages</a> bookmarked for day one: each error category links to its own fix-it page.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "how would I search all my logs for one job_id?", "what does a service event look like when Fargate can't place a task?", "should my app log JSON?" or "how is ECS Exec different from SSH?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> Lesson 10, choosing compute and cost: Fargate vs Fargate Spot vs Managed Instances vs EC2 (for GPUs), Express Mode, ARM/Graviton and rough cost reasoning.</p>
+  <p>Cheat sheets: <a href="../reference/debugging-playbook.html">Debugging playbook</a> · <a href="../reference/images-and-secrets.html">Images and secrets</a> · <a href="../reference/running-jobs.html">Running jobs</a> · <a href="../reference/fargate-networking.html">Networking</a></p>
+  <p class="muted">Sources: [1] <a href="https://repost.aws/knowledge-center/ecs-run-task-cluster">re:Post: tasks fail to start</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_LogConfiguration.html">ECS API: LogConfiguration</a> · [3] <a href="https://aws.amazon.com/blogs/containers/preventing-log-loss-with-non-blocking-mode-in-the-awslogs-container-log-driver/">AWS blog: non-blocking log mode</a> · [4] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-error-codes.html">ECS: stopped task error messages</a> · [5] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/resolve-stopped-errors.html">ECS: resolve stopped task errors</a> · [6] <a href="https://aws.amazon.com/blogs/containers/troubleshooting-containerized-workloads-with-amazon-ecs-events-in-the-aws-console/">AWS blog: ECS events in the console</a> · [7] <a href="https://repost.aws/knowledge-center/ecs-unable-to-pull-secrets">re:Post: ResourceInitializationError</a> · [8] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/cloudwatch-container-insights.html">ECS: Container Insights</a> · [9] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html">ECS: ECS Exec</a> · [10] <a href="https://aws.amazon.com/blogs/containers/best-practices-for-resilience-and-availability-on-amazon-ecs/">AWS blog: resilience and container restarts</a> · [11] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_ContainerRestartPolicy.html">ECS API: ContainerRestartPolicy</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fargate Networking</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="0002-reading-a-task-definition.html">← Lesson 2</a> · Lesson 3 · <a href="../reference/fargate-networking.html">Cheat sheet</a></nav>
+
+<h1>Where your tasks live on the network</h1>
+<p class="subtitle">VPC, subnets, security groups and the load balancer, for a forecast API and a nightly planner</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  You can sketch the standard network layout for a Fargate app: a load balancer in public subnets and tasks in private subnets, with NAT or VPC endpoints for outbound traffic and chained security groups. When something can't connect, you'll know which piece to check.
+</div>
+
+<h2>Warm-up: recall before new material</h2>
+<p>These questions come from lessons 1 and 2. Answer from memory, without opening the old lessons. Recalling something after a gap is what makes it stick.</p>
+<div class="quiz" data-quiz="q-warmup"></div>
+<script type="application/json" id="q-warmup">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "Forecast API tasks fail at startup with \"unable to retrieve secret\" for DB_PASSWORD. Which role needs fixing?",
+      "options": ["The execution role", "The task role"], "answer": 0,
+      "why": "ECS fetches secrets before your code runs, using the execution role." },
+    { "q": "The planner's task definition says awsvpc. Where are its subnets chosen?",
+      "options": ["At run or service", "In the task definition", "In the Docker image", "In the cluster settings"], "answer": 0,
+      "why": "The task definition says HOW (awsvpc). The networkConfiguration on RunTask or the service says WHERE. Today's lesson is about that WHERE." },
+    { "q": "Your weekly retraining job runs as a service with desired count 1. What goes wrong?",
+      "options": ["It restarts after finishing", "It cannot use Spot", "It loses its revision", "It needs load balancer"], "answer": 0,
+      "why": "A service replaces any task that stops, so a finished job gets started again. Run-and-exit work belongs in RunTask." },
+    { "q": "A Scenario Lab solve on Fargate Spot gets an interruption notice. What's the most time it has to save its best solution so far?",
+      "options": ["120 seconds at most", "30 seconds at most", "Ten minutes at most", "Unlimited with stopTimeout set"], "answer": 0,
+      "why": "The maximum stopTimeout is 120 seconds, which lines up with Spot's 2-minute warning. Catch SIGTERM and checkpoint." }
+  ]
+}
+</script>
+
+<h2>Two apps, opposite needs</h2>
+<div class="table-wrap"><table>
+  <tr><th></th><th>Forecast API (idea #1)</th><th>Nightly MILP planner (idea #4)</th></tr>
+  <tr><td><strong>Who connects <em>in</em>?</strong></td><td>Customers, all day, over HTTPS</td><td>Nobody</td></tr>
+  <tr><td><strong>What does it reach <em>out</em> to?</strong></td><td>ECR (image), CloudWatch (logs), Secrets Manager, S3 (model)</td><td>ECR, CloudWatch, S3 (forecasts in, plan out)</td></tr>
+</table></div>
+<p>Every network design question comes down to two things: <strong>what may come in</strong> and <strong>how does it get out</strong>. Both apps need a way out, because a task can't even start without pulling its image. Only the API needs a way in.</p>
+
+<h2>The map: an office campus</h2>
+<p>This continues the building analogy from lesson 2's Q&A.</p>
+<div class="table-wrap"><table>
+  <tr><th>AWS piece</th><th>Campus analogy</th><th>What it really is</th></tr>
+  <tr><td><strong>VPC</strong></td><td>Your private, fenced campus</td><td>Your own isolated network in a Region, for example <code>10.0.0.0/16</code></td></tr>
+  <tr><td><strong>Availability Zone (AZ)</strong></td><td>Two separate sites of the campus</td><td>Separate data centres. Spreading across two keeps you up if one fails</td></tr>
+  <tr><td><strong>Public subnet</strong></td><td>A building with a door onto the street</td><td>A subnet whose route table sends internet traffic to an <em>internet gateway</em></td></tr>
+  <tr><td><strong>Private subnet</strong></td><td>An inner building with no street door</td><td>No direct route to or from the internet</td></tr>
+  <tr><td><strong>Load balancer (ALB)</strong></td><td>Reception desk in the public building</td><td>Takes customer requests and passes them to healthy tasks</td></tr>
+  <tr><td><strong>NAT gateway</strong></td><td>An outgoing-mail room: you can send letters and get replies, but strangers can't walk in</td><td>Lets private tasks start connections <em>out</em> to the internet. Nothing can start a connection <em>in</em></td></tr>
+  <tr><td><strong>VPC endpoint</strong></td><td>A private tunnel straight to an AWS building</td><td>Reach ECR, S3, CloudWatch and so on without using the internet</td></tr>
+  <tr><td><strong>Security group (SG)</strong></td><td>A guard at each task's door, with a guest list</td><td>Allow-rules for which traffic may reach each network interface</td></tr>
+</table></div>
+
+<figure>
+<svg viewBox="0 0 640 430" role="img" aria-label="A VPC across two Availability Zones. An internet-facing ALB in public subnets forwards to forecast API tasks in private subnets. Tasks reach out through a NAT gateway or VPC endpoints.">
+  <style>
+    .vpc { fill: none; stroke: var(--fg); stroke-width: 1.4; }
+    .az { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+    .pub { fill: var(--accent-soft); stroke: none; }
+    .prv { fill: var(--code-bg); stroke: none; }
+    .box { fill: var(--card); stroke: var(--fg); stroke-width: 1.2; }
+    .alb { fill: var(--card); stroke: var(--aws); stroke-width: 1.6; }
+    .task { fill: var(--card); stroke: var(--you); stroke-width: 1.6; }
+    .t { fill: var(--fg); font: 14px var(--serif); }
+    .s { fill: var(--muted); font: italic 12px var(--serif); }
+    .m { fill: var(--fg); font: 11.5px var(--mono); }
+    .in { stroke: var(--aws); stroke-width: 2; fill: none; marker-end: url(#a3in); }
+    .out { stroke: var(--muted); stroke-width: 1.4; stroke-dasharray: 5 3; fill: none; marker-end: url(#a3out); }
+    .ep { stroke: var(--you); stroke-width: 1.4; stroke-dasharray: 5 3; fill: none; marker-end: url(#a3ep); }
+  </style>
+  <defs>
+    <marker id="a3in" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--aws)"/></marker>
+    <marker id="a3out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+    <marker id="a3ep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--you)"/></marker>
+  </defs>
+
+  <text class="t" x="270" y="18">Internet (customers)</text>
+  <rect class="box" x="275" y="40" width="90" height="24" rx="4"/>
+  <text class="s" x="281" y="57">internet gateway</text>
+
+  <rect class="vpc" x="10" y="64" width="620" height="356" rx="8"/>
+  <text class="t" x="20" y="84">VPC 10.0.0.0/16</text>
+
+  <rect class="az" x="24" y="92" width="290" height="250" rx="6"/>
+  <rect class="az" x="326" y="92" width="290" height="250" rx="6"/>
+  <text class="s" x="34" y="108">AZ a</text>
+  <text class="s" x="336" y="108">AZ b</text>
+
+  <rect class="pub" x="32" y="114" width="274" height="82" rx="4"/>
+  <rect class="pub" x="334" y="114" width="274" height="82" rx="4"/>
+  <text class="s" x="40" y="130">public subnet</text>
+  <text class="s" x="342" y="130">public subnet</text>
+
+  <rect class="alb" x="120" y="140" width="400" height="40" rx="5"/>
+  <text class="t" x="132" y="158">Application Load Balancer</text>
+  <text class="m" x="132" y="173">sg-alb: allow 443 from 0.0.0.0/0</text>
+  <rect class="box" x="44" y="146" width="66" height="34" rx="4"/>
+  <text class="s" x="52" y="167">NAT gw</text>
+
+  <rect class="prv" x="32" y="206" width="274" height="128" rx="4"/>
+  <rect class="prv" x="334" y="206" width="274" height="128" rx="4"/>
+  <text class="s" x="40" y="222">private subnet</text>
+  <text class="s" x="342" y="222">private subnet</text>
+
+  <rect class="task" x="100" y="236" width="190" height="80" rx="5"/>
+  <text class="t" x="112" y="256">forecast-api task</text>
+  <text class="m" x="112" y="276">10.0.11.15:8000</text>
+  <text class="m" x="112" y="296">sg-tasks: 8000 from sg-alb</text>
+  <rect class="task" x="402" y="236" width="190" height="80" rx="5"/>
+  <text class="t" x="414" y="256">forecast-api task</text>
+  <text class="m" x="414" y="276">10.0.12.16:8000</text>
+  <text class="m" x="414" y="296">sg-tasks: 8000 from sg-alb</text>
+
+  <rect class="box" x="24" y="356" width="592" height="52" rx="5"/>
+  <text class="t" x="36" y="376">VPC endpoints (private tunnels to AWS)</text>
+  <text class="m" x="36" y="396">ecr.api · ecr.dkr · S3 (gateway) · logs · secretsmanager</text>
+
+  <path class="in" d="M320 22 L320 38"/>
+  <path class="in" d="M320 64 L320 138"/>
+  <path class="in" d="M230 182 L200 234"/>
+  <path class="in" d="M420 182 L470 234"/>
+  <path class="out" d="M104 250 L78 182"/>
+  <path class="out" d="M70 146 L275 56"/>
+  <path class="ep" d="M180 318 L180 354"/>
+  <path class="ep" d="M500 318 L500 354"/>
+</svg>
+<figcaption>
+  <span class="aws">Solid arrows</span>: a customer request comes in through the internet gateway to the ALB, which passes it to a task.
+  <span class="muted">Grey dashed</span>: the task reaches out through the NAT gateway.
+  <span class="you">Blue dashed</span>: or through VPC endpoints, without touching the internet.
+  Tasks have <em>no</em> public IP, and only the ALB is reachable from the internet.<sup class="cite"><a href="https://aws.amazon.com/blogs/compute/task-networking-in-aws-fargate/">[1]</a></sup>
+</figcaption>
+</figure>
+
+<h2>Way in: the load balancer path</h2>
+<p>AWS's guidance for a container serving internet traffic from a private subnet: put a load balancer in a <strong>public subnet</strong> and let ECS forward traffic to tasks in the <strong>private subnet</strong>.<sup class="cite"><a href="https://aws.amazon.com/blogs/compute/task-networking-in-aws-fargate/">[1]</a></sup> Four details make it work:</p>
+<ul>
+  <li><strong>The ALB spans at least two AZs.</strong> You must give it subnets in at least two different Availability Zones.<sup class="cite"><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html">[2]</a></sup> Run your tasks in matching private subnets in both AZs too.</li>
+  <li><strong>The target group uses type <code>ip</code>.</strong> With <code>awsvpc</code>, "you must choose <code>ip</code> as the target type, not <code>instance</code>", because each task is its own network interface, not an EC2 instance.<sup class="cite"><a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-taskset-loadbalancer.html">[3]</a></sup></li>
+  <li><strong>ECS keeps the target list up to date for you.</strong> "When each task starts, the IP address of its elastic network interface is added to the load balancer's configuration," and traffic is drained before a task is removed.<sup class="cite"><a href="https://aws.amazon.com/blogs/compute/task-networking-in-aws-fargate/">[1]</a></sup> When autoscaling goes from 2 to 4 tasks, the new IPs simply appear in the target group.</li>
+  <li><strong>Health checks hit your <code>/health</code>.</strong> The ALB sends traffic only to targets that pass. The service's <em>health check grace period</em> tells ECS to ignore failing checks for a while after a task starts.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v1/docs/@aws-cdk_aws-ecs-patterns.ApplicationLoadBalancedFargateServiceProps.html">[4]</a></sup> That gives your model time to load.</li>
+</ul>
+
+<div class="seq" data-seq="s-request"></div>
+<script type="application/json" id="s-request">
+{
+  "title": "Trace one forecast request",
+  "intro": "Click the steps in the order they happen when a customer calls POST /forecast.",
+  "steps": [
+    "Customer sends HTTPS request to the ALB's DNS name",
+    "Request enters the VPC through the internet gateway",
+    "ALB's security group allows inbound 443 from the internet",
+    "ALB picks a healthy target (task IP) from the ip target group",
+    "Task's security group allows port 8000 because the source is sg-alb",
+    "FastAPI in the task computes the forecast and responds",
+    "Response returns through the ALB to the customer"
+  ],
+  "why": "Only the ALB is exposed to the internet. The task's guard admits only the ALB, so even someone who knew the task's private IP couldn't reach it."
+}
+</script>
+
+<h2>Way out: NAT gateway or VPC endpoints</h2>
+<p>Here's the part that catches most people: <strong>"For a task on Fargate to pull a container image, the task must have a route to the internet."</strong> The docs list three ways to give it one:<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html">[5]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>Option</th><th>How</th><th>Good for</th></tr>
+  <tr><td><strong>Public subnet + public IP</strong></td><td><code>assignPublicIp: ENABLED</code></td><td>Quick experiments only, because the task is directly on the internet</td></tr>
+  <tr><td><strong>NAT gateway</strong></td><td>Private subnet route → NAT in a public subnet</td><td>Tasks that also call <em>non-AWS</em> internet services (a third-party API, <code>pip install</code> at runtime)</td></tr>
+  <tr><td><strong>VPC endpoints</strong></td><td>Private tunnels to specific AWS services</td><td>Traffic that never needs the public internet. A Fargate task pulling from ECR needs <code>ecr.dkr</code>, <code>ecr.api</code> and the <strong>S3 gateway</strong> endpoint, plus <code>logs</code> for awslogs and <code>secretsmanager</code> if you use secrets<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-unable-to-pull-secrets">[6]</a></sup></td></tr>
+</table></div>
+<p>Why does ECR need the <em>S3</em> endpoint? An image pull first asks ECR for the image manifest, then downloads the actual image layers from S3.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html">[10]</a></sup> Your planner reads and writes S3 as well, so it uses that same endpoint. If none of these paths exist, the classic symptom is a task <strong>stuck in PENDING</strong>, then failing with an image-pull or <code>ResourceInitializationError</code>.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-fargate-tasks-pending-state">[7]</a></sup></p>
+<p class="muted">Both NAT gateways and interface endpoints charge per hour plus per GB of traffic, so it's a design choice, not a free default. We'll leave cost to a later lesson.</p>
+
+<h2>Security groups: guest lists that reference each other</h2>
+<p>Don't write a task's guest list as "allow port 8000 from anywhere in the VPC". Write it as <strong>"allow 8000 from whoever carries the ALB's security group"</strong>. Recommended rules allow traffic from the load balancer's security group rather than from IP ranges.<sup class="cite"><a href="https://repost.aws/knowledge-center/public-load-balancer-private-ec2">[8]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>Security group</th><th>Inbound rule</th><th>Meaning</th></tr>
+  <tr><td><code>sg-alb</code></td><td>TCP 443 from <code>0.0.0.0/0</code></td><td>Anyone on the internet may talk to reception</td></tr>
+  <tr><td><code>sg-forecast-tasks</code></td><td>TCP 8000 from <code>sg-alb</code></td><td>Only reception may talk to API tasks</td></tr>
+  <tr><td><code>sg-planner</code></td><td><em>none</em></td><td>Nobody may start a connection to the planner. It can still reach out</td></tr>
+</table></div>
+<p>The planner with zero inbound rules is not a mistake. Security groups track connections, so the replies to the planner's own outbound calls (to S3, ECR and so on) are let back in automatically. "No inbound rules" just means nobody can <em>start</em> a conversation with it.</p>
+
+<h2>Where it all goes in config</h2>
+<p>Here's the forecast API's <strong>service</strong> definition: the WHERE from lesson 2, plus the load balancer. As before, say out loud what each highlighted part does, then click to check.</p>
+<div class="anno">
+<pre><code>{
+  "serviceName": "forecast-api",
+  "cluster": "prod",
+  "taskDefinition": "forecast-api:12",
+  "desiredCount": 2,
+  "launchType": "FARGATE",
+  <span class="a" data-k="netcfg">"networkConfiguration": {
+    "awsvpcConfiguration": {</span>
+      <span class="a" data-k="subnets">"subnets": ["subnet-private-a", "subnet-private-b"],</span>
+      <span class="a" data-k="sgs">"securityGroups": ["sg-forecast-tasks"],</span>
+      <span class="a" data-k="pubip">"assignPublicIp": "DISABLED"</span>
+    }
+  },
+  <span class="a" data-k="lb">"loadBalancers": [{
+    "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/forecast-api-tg/…",</span>
+    <span class="a" data-k="cport">"containerName": "api",
+    "containerPort": 8000</span>
+  }],
+  <span class="a" data-k="grace">"healthCheckGracePeriodSeconds": 120</span>
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="netcfg"><b><code>networkConfiguration.awsvpcConfiguration</code></b>: the WHERE for an <code>awsvpc</code> task. It's required for awsvpc tasks and isn't supported in other modes.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[9]</a></sup> RunTask takes exactly the same block, which is how the planner gets its subnets.</div>
+  <div data-k="subnets"><b><code>subnets</code></b>: <em>private</em> subnets in two AZs, all in the same VPC. ECS spreads tasks across them, so losing one AZ doesn't take the API down.</div>
+  <div data-k="sgs"><b><code>securityGroups</code></b>: the guard on each task's network interface. Its only inbound rule is 8000 from <code>sg-alb</code>.</div>
+  <div data-k="pubip"><b><code>assignPublicIp: DISABLED</code></b>: the tasks aren't reachable from the internet. They reach out through NAT or VPC endpoints instead.</div>
+  <div data-k="lb"><b><code>loadBalancers.targetGroupArn</code></b>: the ALB target group (type <code>ip</code>) where ECS registers each task's IP as it starts and removes it as it stops.</div>
+  <div data-k="cport"><b><code>containerName</code> / <code>containerPort</code></b>: which container in the task receives the traffic, and on which port. It must match a <code>containerPort</code> in the task definition's <code>portMappings</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-taskset-loadbalancer.html">[3]</a></sup> This is why the API, unlike the planner, has port mappings.</div>
+  <div data-k="grace"><b><code>healthCheckGracePeriodSeconds</code></b>: how long ECS ignores failing ALB health checks after a task starts.<sup class="cite"><a href="https://docs.aws.amazon.com/cdk/api/v1/docs/@aws-cdk_aws-ecs-patterns.ApplicationLoadBalancedFargateServiceProps.html">[4]</a></sup> Set it longer than your model takes to load, or ECS will keep killing tasks that are still starting up.</div>
+</div>
+</div>
+
+<h2>Practice: find the broken piece</h2>
+<div class="quiz" data-quiz="q-net"></div>
+<script type="application/json" id="q-net">
+{
+  "title": "Which piece is broken?",
+  "intro": "Debugging is mostly about knowing which piece to check. Some of these are permission problems, not network problems.",
+  "shuffle": true,
+  "questions": [
+    { "q": "Forecast API tasks are running and their logs look fine, but ALB health checks to them time out and the logs show no incoming requests at all.",
+      "options": ["The ALB security group", "The task security group", "The NAT gateway route", "The task IAM role"], "answer": 1,
+      "why": "The ALB can't get through the task's door. Check that sg-forecast-tasks allows the container port from sg-alb." },
+    { "q": "Customers' HTTPS requests to the ALB time out, yet every target in the target group shows healthy.",
+      "options": ["The ALB security group", "The task security group", "The NAT gateway route", "The task IAM role"], "answer": 0,
+      "why": "The tasks are fine, since health checks pass. Customers can't reach reception, so sg-alb needs inbound 443 from the internet." },
+    { "q": "The planner, in a private subnet with no VPC endpoints, stays in PENDING and then fails to pull its image.",
+      "options": ["The ALB security group", "The task security group", "The NAT gateway route", "The task IAM role"], "answer": 2,
+      "why": "The task has no way out to ECR. Add a NAT gateway route, or the ECR (api + dkr) and S3 gateway endpoints." },
+    { "q": "The planner starts fine and logs to CloudWatch, but every boto3 put_object to S3 returns AccessDenied.",
+      "options": ["The ALB security group", "The task security group", "The NAT gateway route", "The task IAM role"], "answer": 3,
+      "why": "AccessDenied is a permission answer from S3, which proves the network path works. It's lesson 2's task role." },
+    { "q": "You're creating the ALB target group for the forecast API on Fargate. Which target type do you choose?",
+      "options": ["ip", "instance", "lambda", "alb"], "answer": 0,
+      "why": "awsvpc tasks are network interfaces, not EC2 instances, so the target type must be ip." },
+    { "q": "Scenario Lab workers pull jobs from SQS and write results to S3. Do they need a load balancer?",
+      "options": ["No, nothing calls in", "Yes, for SQS messages", "Yes, for health checks", "Yes, Fargate requires one"], "answer": 0,
+      "why": "Workers only reach out (to SQS and S3). Load balancers are for traffic coming in." },
+    { "q": "The agentic assistant in a private subnet must call a third-party weather API on the public internet. What makes this work?",
+      "options": ["Route through NAT gateway", "Add S3 gateway endpoint", "Open task inbound rules", "Use bridge network mode"], "answer": 0,
+      "why": "VPC endpoints only reach AWS services. For the public internet, a private task needs a NAT gateway." },
+    { "q": "Why put the ALB in public subnets and the tasks in private subnets, rather than giving tasks public IPs?",
+      "options": ["Only ALB faces the internet", "Private subnets cost much less", "Fargate requires private subnets only", "Public IPs break health checks"], "answer": 0,
+      "why": "It keeps the internet-facing surface to one managed, hardened entry point. Tasks stay unreachable except through it." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>Why port 8000 for the forecast API?</summary>
+<p>It isn't an AWS rule. <strong>8000 is Uvicorn's default port</strong>, and Uvicorn is the server that usually runs FastAPI.<sup class="cite"><a href="https://www.uvicorn.dev/settings">[11]</a></sup> Any port works, as long as <strong>five places agree</strong>:</p>
+<pre><code>1. App listens on       uvicorn app:api --host 0.0.0.0 --port 8000
+2. Task definition      "portMappings": [{ "containerPort": 8000 }]
+3. Service              loadBalancers[].containerPort = 8000
+4. Target group         port 8000, health check /health
+5. Task SG              inbound TCP 8000 from sg-alb</code></pre>
+<ul>
+<li><strong>If one of them differs</strong>, the ALB knocks on a port where nothing is listening. Health checks fail and tasks get replaced over and over.</li>
+<li><strong>Customers never see 8000.</strong> They use <strong>443</strong> on the ALB, and 8000 is only the internal hop.</li>
+<li><strong>Bind to <code>0.0.0.0</code>.</strong> Uvicorn defaults to <code>127.0.0.1</code>,<sup class="cite"><a href="https://www.uvicorn.dev/settings">[11]</a></sup> which inside a container means "only reachable from within this task", so the ALB can't reach it.</li>
+<li><strong>Ports above 1024</strong> avoid needing root inside the container.</li>
+</ul>
+</details>
+
+<div class="quiz" data-quiz="q-followups3"></div>
+<script type="application/json" id="q-followups3">
+{
+  "title": "Check your follow-up",
+  "shuffle": true,
+  "questions": [
+    { "q": "You change the Dockerfile to run uvicorn on port 9000 but leave the task definition, target group and security group at 8000. What happens?",
+      "options": ["Health checks start failing", "Image pull starts failing", "Execution role stops working", "Nothing, ECS adapts automatically"], "answer": 0,
+      "why": "The ALB still sends requests and health checks to 8000, where nothing is listening. All five places must use the same port." },
+    { "q": "Everything says 8000, but targets are unhealthy and the app logs show no requests. The CMD is uvicorn app:api --port 8000. What's missing?",
+      "options": ["Bind host to 0.0.0.0", "Open port 443 inbound", "Add a NAT gateway", "Switch to bridge mode"], "answer": 0,
+      "why": "Uvicorn defaults to host 127.0.0.1, so it only accepts connections from inside the task. Pass --host 0.0.0.0." }
+  ]
+}
+</script>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html">Amazon ECS task networking options for Fargate</a>. It's short and covers the three routes out. Then read the <em>Load balancers</em> section of the AWS blog <a href="https://aws.amazon.com/blogs/compute/task-networking-in-aws-fargate/">Task Networking in AWS Fargate</a> for the public ALB / private task pattern.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "do I need a NAT gateway in each AZ?", "how would an internal-only Scenario Lab API look?" or "what's a route table, really?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> <a href="0004-running-jobs.html">Lesson 4</a>, running jobs. It covers RunTask in depth, scheduling the nightly planner with EventBridge Scheduler, and Scenario Lab's 200-run fan-out with overrides and concurrency limits.</p>
+  <p>Cheat sheets: <a href="../reference/fargate-networking.html">Fargate networking</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a> · <a href="../reference/ecs-building-blocks.html">Building blocks</a></p>
+  <p class="muted">Sources: [1] <a href="https://aws.amazon.com/blogs/compute/task-networking-in-aws-fargate/">AWS blog: Task Networking in AWS Fargate</a> · [2] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html">Application Load Balancers</a> · [3] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-taskset-loadbalancer.html">ECS LoadBalancer property</a> · [4] <a href="https://docs.aws.amazon.com/cdk/api/v1/docs/@aws-cdk_aws-ecs-patterns.ApplicationLoadBalancedFargateServiceProps.html">CDK: healthCheckGracePeriod</a> · [5] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html">Task networking options for Fargate</a> · [6] <a href="https://repost.aws/knowledge-center/ecs-unable-to-pull-secrets">re:Post: ResourceInitializationError</a> · [7] <a href="https://repost.aws/knowledge-center/ecs-fargate-tasks-pending-state">re:Post: Fargate tasks stuck in PENDING</a> · [8] <a href="https://repost.aws/knowledge-center/public-load-balancer-private-ec2">re:Post: private targets behind an internet-facing load balancer</a> · [9] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">ECS API: RunTask</a> · [10] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/vpc-endpoints.html">ECR interface VPC endpoints</a> · [11] <a href="https://www.uvicorn.dev/settings">Uvicorn settings</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/sequence.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

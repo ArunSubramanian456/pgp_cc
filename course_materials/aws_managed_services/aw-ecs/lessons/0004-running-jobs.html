@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running Jobs</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="0003-networking-for-fargate.html">← Lesson 3</a> · Lesson 4 · <a href="../reference/running-jobs.html">Cheat sheet</a></nav>
+
+<h1>Running one job well</h1>
+<p class="subtitle">RunTask, the task lifecycle, exit codes, and a 1am schedule for the MILP planner</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  You can start the nightly planner with RunTask, follow it through its lifecycle, tell from its <code>stopCode</code> and exit code whether last night's plan actually succeeded, and put it on a schedule with EventBridge Scheduler. You'll also know why "the schedule fired" does <em>not</em> mean "the plan was written".
+</div>
+
+<h2>Warm-up</h2>
+<div class="quiz" data-quiz="q-warmup4"></div>
+<script type="application/json" id="q-warmup4">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "A planner task in a fully private VPC (no NAT) must pull its image from ECR. Which endpoints are the minimum?",
+      "options": ["ecr.api, ecr.dkr, S3 gateway", "ecr.api, logs, secretsmanager", "ecs, ecr.dkr, sts", "S3 gateway, logs, ssm"], "answer": 0,
+      "why": "ECR needs both its endpoints, plus S3 because the image layers live there. You'd add logs and secretsmanager if the task uses awslogs or secrets." },
+    { "q": "Which inbound rules does the security group for Scenario Lab workers need?",
+      "options": ["None at all needed", "443 from the internet", "Port 8000 from sg-alb", "All traffic from VPC"], "answer": 0,
+      "why": "Nothing calls in to workers. They only reach out, and replies to their own outbound calls get back in automatically." },
+    { "q": "Who pulls the planner's image from ECR, and with which role?",
+      "options": ["ECS, with execution role", "Your code, with task role"], "answer": 0,
+      "why": "The image pull happens before your code exists, so ECS/Fargate does it with the execution role." },
+    { "q": "The forecast API runs 2 tasks. Each task has the API container plus an OpenTelemetry sidecar. How many containers are running?",
+      "options": ["Four containers in total", "Three containers in total", "Two containers in total", "Six containers in total"], "answer": 0,
+      "why": "Every task carries every container in its task definition: 2 tasks × 2 containers = 4." }
+  ]
+}
+</script>
+
+<h2>1 · Anatomy of a RunTask call</h2>
+<p><code>RunTask</code> "starts a new task using the specified task definition".<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup> Here is tonight's planner run in boto3. You've already met the network block and overrides. Say out loud what each highlighted part does, then click to check.</p>
+
+<div class="anno">
+<pre><code>import boto3
+ecs = boto3.client("ecs")
+
+resp = ecs.run_task(
+    cluster="planning",
+    <span class="a" data-k="tdef">taskDefinition="replenishment-planner:3",</span>
+    <span class="a" data-k="count">count=1,</span>
+    <span class="a" data-k="cps">capacityProviderStrategy=[{"capacityProvider": "FARGATE", "weight": 1}],</span>
+    <span class="a" data-k="net">networkConfiguration={"awsvpcConfiguration": {
+        "subnets": ["subnet-private-a", "subnet-private-b"],
+        "securityGroups": ["sg-planner"],
+        "assignPublicIp": "DISABLED"}},</span>
+    <span class="a" data-k="ovr">overrides={"containerOverrides": [{
+        "name": "solver",
+        "environment": [{"name": "PLAN_DATE", "value": "2026-10-22"}]}]},</span>
+    <span class="a" data-k="started">startedBy="nightly-2026-10-22",</span>
+    <span class="a" data-k="token">clientToken="replenishment-2026-10-22",</span>
+)
+<span class="a" data-k="failures">if resp["failures"]:
+    raise RuntimeError(resp["failures"])</span>
+task_arn = resp["tasks"][0]["taskArn"]</code></pre>
+<div class="anno-notes">
+  <div data-k="tdef"><b><code>taskDefinition</code></b>: pin the exact revision (<code>:3</code>). If you leave it out, ECS uses the <em>latest</em> revision,<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup> so whoever registers a new revision during the day would silently change tonight's solve.</div>
+  <div data-k="count"><b><code>count</code></b>: how many identical copies to start, <strong>up to 10 per call</strong>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup> The planner needs one. Lesson 5 deals with running 200.</div>
+  <div data-k="cps"><b><code>capacityProviderStrategy</code></b>: <em>which kind</em> of Fargate to use. <code>FARGATE</code> is on-demand. For Spot you must use <code>FARGATE_SPOT</code> here, because the <code>launchType</code> parameter has no Spot option. Use either <code>launchType</code> or a capacity provider strategy, never both.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup> The nightly plan is business-critical, so it stays on on-demand.</div>
+  <div data-k="net"><b><code>networkConfiguration</code></b>: the WHERE from lesson 3. Private subnets in two AZs, a security group with no inbound rules, and no public IP.</div>
+  <div data-k="ovr"><b><code>overrides</code></b>: per-run inputs (lesson 2). Here it's the plan date. The 8,192-character limit still applies.</div>
+  <div data-k="started"><b><code>startedBy</code></b>: a tag (up to 128 characters) so you can list exactly which tasks belong to tonight's run.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[1]</a></sup></div>
+  <div data-k="token"><b><code>clientToken</code></b>: protection against starting the job twice. If you retry with the same token and the same parameters, ECS returns the <em>original</em> task instead of starting a new one. The token stays valid for up to 24 hours.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_Idempotency.html">[2]</a></sup> If your script times out and retries, you still get one planner, not two writing the same plan.</div>
+  <div data-k="failures"><b><code>failures</code></b>: RunTask can return a successful response that still lists tasks it <em>couldn't</em> start (in <code>failures</code>), for example for capacity reasons. Always check it.</div>
+</div>
+</div>
+
+<h2>2 · The lifecycle: what happens between "run" and "done"</h2>
+<p>Every task goes through the same states. Each state is where something from an earlier lesson happens:<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-lifecycle-explanation.html">[3]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>State</th><th>What ECS is doing</th><th>Where you've seen it</th></tr>
+  <tr><td><code>PROVISIONING</code></td><td>Creating the task's network interface (for awsvpc)</td><td>Lesson 3: the task's own network interface</td></tr>
+  <tr><td><code>PENDING</code></td><td>Waiting for resources</td><td>Stuck here is a classic sign of no way out to ECR</td></tr>
+  <tr><td><code>ACTIVATING</code></td><td>Pulling images, creating containers, configuring networking, registering with load balancers</td><td>Execution role, NAT or endpoints, target group</td></tr>
+  <tr><td><code>RUNNING</code></td><td>Your code is running</td><td>The 40-minute solve</td></tr>
+  <tr><td><code>DEACTIVATING</code></td><td>Removing the task from load balancer target groups</td><td>Lesson 3: drain before stop</td></tr>
+  <tr><td><code>STOPPING</code></td><td>Sending the stop signal (SIGTERM by default), then SIGKILL after <code>stopTimeout</code></td><td>Lesson 2: stopTimeout</td></tr>
+  <tr><td><code>DEPROVISIONING</code></td><td>Detaching and deleting the network interface</td><td>Lesson 3</td></tr>
+  <tr><td><code>STOPPED</code></td><td>Done. <em>Why</em> it stopped is recorded on the task</td><td>Next section</td></tr>
+</table></div>
+
+<div class="seq" data-seq="s-lifecycle"></div>
+<script type="application/json" id="s-lifecycle">
+{
+  "title": "Put the lifecycle in order",
+  "intro": "Cover the table above first, then click the states in the order a task passes through them.",
+  "steps": ["PROVISIONING", "PENDING", "ACTIVATING", "RUNNING", "DEACTIVATING", "STOPPING", "DEPROVISIONING", "STOPPED"],
+  "why": "Here's the pattern: getting started (PROVISIONING → ACTIVATING), the work (RUNNING), then shutdown (DEACTIVATING → STOPPED), which mirrors the startup steps in reverse. A batch job that finishes on its own still goes through the shutdown states."
+}
+</script>
+
+<h2>3 · Did last night's plan actually succeed?</h2>
+<p>A <code>STOPPED</code> task carries two clues. One is the task's <strong><code>stopCode</code></strong>: <em>why</em> ECS considers it stopped, such as <code>TaskFailedToStart</code>, <code>EssentialContainerExited</code> or <code>UserInitiated</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/sdk-for-ruby/v2/api/Aws/ECS/Types/Task.html">[4]</a></sup> The other is each container's <strong>exit code</strong>, which is how <em>your process</em> ended:<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-task-stopped">[5]</a></sup></p>
+<div class="table-wrap"><table>
+  <tr><th>Exit code</th><th>Meaning</th><th>For the planner</th></tr>
+  <tr><td><code>0</code></td><td>The command completed</td><td>Plan written, as long as your code only exits 0 after the S3 write succeeds</td></tr>
+  <tr><td><code>1</code></td><td>Application error</td><td>A Python exception, an infeasible model your code treats as an error, bad input. Check the logs</td></tr>
+  <tr><td><code>137</code></td><td>Killed with SIGKILL: it ignored SIGTERM past the timeout, <strong>or ran out of memory</strong></td><td>A branch-and-bound tree that outgrew 32 GB. Check the memory metrics</td></tr>
+  <tr><td><code>143</code></td><td>Stopped by SIGTERM, the graceful-shutdown signal</td><td>Someone or something stopped it, e.g. a deployment or a Spot interruption</td></tr>
+</table></div>
+
+<div class="callout">
+  <strong>Your exit code is a contract</strong>
+  ECS and every tool built on it judge your job <em>only</em> by these codes. If your solver catches an infeasibility, logs "no feasible plan" and then exits <code>0</code>, everything downstream thinks the night went fine. Decide on purpose what counts as failure, and exit non-zero for it.
+</div>
+
+<p><strong>The details of a stopped task only stay visible through <code>DescribeTasks</code> for about 1 hour.</strong><sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-task-stopped">[5]</a></sup> You won't be awake at 1:45am, so capture them as they happen. ECS publishes <em>task state change</em> events to EventBridge, with <code>lastStatus</code>, <code>stopCode</code> and <code>stoppedReason</code> included.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/effective-use-amazon-ecs-lifecycle-events-with-amazon-cloudwatch-logs-insights/">[6]</a></sup> An EventBridge rule can match "planner task reached STOPPED" and send it to <strong>SNS</strong>, the service you covered in your course's messaging module, which emails you when the exit code isn't 0.</p>
+
+<h2>4 · Putting it on a 1am schedule</h2>
+<p><strong>EventBridge Scheduler</strong> calls an API for you on a schedule, with no cron server to run. It has a <em>templated target</em> for ECS <code>RunTask</code>, and you can pass container overrides through it.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/migrate-cron-jobs-to-event-driven-architectures-using-amazon-elastic-container-service-and-amazon-eventbridge/">[7]</a></sup></p>
+
+<pre><code>Schedule  "nightly-replenishment"
+  ScheduleExpression          cron(0 1 * * ? *)        ← minute hour day-of-month month day-of-week year
+  ScheduleExpressionTimezone  America/New_York          ← your business's time zone, not UTC
+  FlexibleTimeWindow          OFF                       ← run at 01:00, not "sometime around"
+  Target
+    Arn        arn:aws:ecs:…:cluster/planning
+    RoleArn    scheduler-run-planner                    ← a THIRD role (see below)
+    EcsParameters
+      TaskDefinitionArn  …:task-definition/replenishment-planner:3
+      LaunchType         FARGATE
+      NetworkConfiguration  (private subnets, sg-planner, no public IP)
+    RetryPolicy       MaximumRetryAttempts 2
+    DeadLetterConfig  sqs: scheduler-dlq</code></pre>
+
+<ul>
+  <li><strong>Cron has six fields</strong>, including year.<sup class="cite"><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html">[8]</a></sup> <code>cron(0 1 * * ? *)</code> means "minute 0 of hour 1, every day". The <code>?</code> means "no specific value", because you set day-of-month <em>or</em> day-of-week, not both.</li>
+  <li><strong>Time zone.</strong> Scheduler can run cron in UTC or in a time zone you choose,<sup class="cite"><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html">[8]</a></sup> so "1am" stays 1am local time when the clocks change.</li>
+  <li><strong>A third role.</strong> The Scheduler has its own <em>execution role</em>, which it assumes to call <code>RunTask</code> for you.<sup class="cite"><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html">[9]</a></sup> It also needs permission to pass your task's roles to ECS (<code>iam:PassRole</code>). The console can create it for you.</li>
+  <li><strong>Retries and the dead-letter queue (DLQ)</strong> cover a failure to <em>deliver</em> the invocation. After the retries are used up, the failed event goes to an SQS DLQ.<sup class="cite"><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-schedule.html">[10]</a></sup></li>
+</ul>
+
+<div class="callout">
+  <strong>"The schedule fired" ≠ "the plan was written"</strong>
+  The Scheduler's job ends once it has called <code>RunTask</code>. Its retries and DLQ are about <em>that call</em>. If the solver then crashes with exit code 1 at 1:37am, the Scheduler doesn't know and won't retry. Watching the result is section 3's job: task state change events, then SNS.
+</div>
+
+<figure>
+<pre><code>01:00  EventBridge Scheduler ──RunTask(:3)──►  ECS
+                                               │  PROVISIONING → PENDING → ACTIVATING
+                                               ▼
+01:01                                       RUNNING   (HiGHS solving, logs → CloudWatch)
+                                               │
+01:41                                       exit 0 → STOPPED (EssentialContainerExited)
+                                               │
+                     task state change event ──┴──► EventBridge rule ──► SNS ──► email if exitCode ≠ 0
+                     plan ──────────────────────────► s3://acme-plans/replenishment/2026-10-22/</code></pre>
+<figcaption>The full night: one service starts the job and a different one watches the result. A job that exits normally still shows stopCode EssentialContainerExited, so the exit code is what tells you whether it succeeded.</figcaption>
+</figure>
+
+<h2>Practice</h2>
+<div class="quiz" data-quiz="q-jobs"></div>
+<script type="application/json" id="q-jobs">
+{
+  "title": "Diagnose the night",
+  "shuffle": true,
+  "questions": [
+    { "q": "The planner sits in PENDING/ACTIVATING for minutes, then stops with CannotPullContainer. Which pieces do you check?",
+      "options": ["Network path or execution role", "Task role or SIGTERM handler", "Target group or health check", "Cron expression or time zone"], "answer": 0,
+      "why": "Image pulls happen in ACTIVATING, using the execution role, over NAT or VPC endpoints. Your code hasn't run yet." },
+    { "q": "The task is STOPPED with stopCode EssentialContainerExited and the solver container's exit code is 1.",
+      "options": ["Your Python code raised error", "ECS ran out of capacity", "The solve finished without problems", "Fargate Spot interrupted the task"], "answer": 0,
+      "why": "Exit code 1 is an application error. Read the CloudWatch logs. EssentialContainerExited only says the main container ended." },
+    { "q": "Exit code 137, and the memory metrics were flat at the limit just before it.",
+      "options": ["Out of memory, raise memory", "Image tag was not found", "Secret could not be fetched", "Subnet ran out of IPs"], "answer": 0,
+      "why": "137 means SIGKILL, which happens on out-of-memory (or ignoring SIGTERM). Choose a larger valid Fargate memory, or tighten the model." },
+    { "q": "The solver container exited with code 143.",
+      "options": ["Stopped by SIGTERM signal", "Killed by SIGKILL signal", "Crashed with Python exception", "Finished the solve normally"], "answer": 0,
+      "why": "143 = stopped by SIGTERM. Something stopped the task, such as StopTask, a deployment or Spot. 137 is SIGKILL." },
+    { "q": "The Scheduler console shows the 01:00 invocation succeeded, but there's no plan in S3. How is that possible?",
+      "options": ["Scheduler only started the task", "Scheduler retries failed solves automatically", "Scheduler writes plans itself directly", "Scheduler ran at UTC instead"], "answer": 0,
+      "why": "The Scheduler's success means RunTask was called. The solve can still fail afterwards. Watch task state change events and the exit code." },
+    { "q": "Which expression runs at 01:00 every day?",
+      "options": ["cron(0 1 * * ? *)", "cron(1 0 * * ? *)", "cron(0 1 1 * ? *)", "rate(1 day) at 01"], "answer": 0,
+      "why": "The fields are minutes, hours, day-of-month, month, day-of-week, year. cron(1 0 …) is 00:01, and cron(0 1 1 …) runs only on the 1st of the month." },
+    { "q": "Your wrapper script retries RunTask after a timeout. Which parameter stops a second planner from starting?",
+      "options": ["clientToken", "startedBy", "group", "count"], "answer": 0,
+      "why": "If you retry with the same clientToken and the same parameters, you get the original task back. The token is valid for up to 24 hours." },
+    { "q": "You want a cheap rerun of a non-urgent backtest on Fargate Spot via RunTask. What do you pass?",
+      "options": ["capacityProviderStrategy: FARGATE_SPOT", "launchType: FARGATE_SPOT", "platformVersion: SPOT", "overrides: SPOT=true"], "answer": 0,
+      "why": "launchType has no Spot value. Use a capacity provider strategy with FARGATE_SPOT, and leave out launchType." }
+  ]
+}
+</script>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-lifecycle-explanation.html">Amazon ECS task lifecycle</a>, a single page you'll use for debugging for the rest of your ECS life. Then read <a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html">Schedule types in EventBridge Scheduler</a> for cron and time zones.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "what should the planner do if the MILP is infeasible?", "how do I write the EventBridge rule for non-zero exit codes?" or "should the nightly planner ever use Spot?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> <a href="0005-running-many-jobs.html">Lesson 5</a>, running <em>many</em> jobs. Scenario Lab: 200 what-if MILPs and forecasts against a baseline, a concurrency limit so you don't hit the vCPU quota, Spot with retries, and collecting the results.</p>
+  <p>Cheat sheets: <a href="../reference/running-jobs.html">Running jobs</a> · <a href="../reference/fargate-networking.html">Networking</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a> · <a href="../reference/ecs-building-blocks.html">Building blocks</a></p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">ECS API: RunTask</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_Idempotency.html">ECS: Ensuring idempotency</a> · [3] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-lifecycle-explanation.html">ECS task lifecycle</a> · [4] <a href="https://docs.aws.amazon.com/sdk-for-ruby/v2/api/Aws/ECS/Types/Task.html">ECS API: Task.stopCode</a> · [5] <a href="https://repost.aws/knowledge-center/ecs-task-stopped">re:Post: Why has my ECS task stopped?</a> · [6] <a href="https://aws.amazon.com/blogs/containers/effective-use-amazon-ecs-lifecycle-events-with-amazon-cloudwatch-logs-insights/">AWS blog: ECS lifecycle events</a> · [7] <a href="https://aws.amazon.com/blogs/containers/migrate-cron-jobs-to-event-driven-architectures-using-amazon-elastic-container-service-and-amazon-eventbridge/">AWS blog: Migrate cron jobs to ECS + EventBridge</a> · [8] <a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html">Scheduler: schedule types</a> · [9] <a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/setting-up.html">Scheduler: setting up</a> · [10] <a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-schedule.html">Scheduler: managing a schedule</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/sequence.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

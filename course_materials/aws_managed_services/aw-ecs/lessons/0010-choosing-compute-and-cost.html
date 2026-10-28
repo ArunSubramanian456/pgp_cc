@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Choosing Compute</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="../ROADMAP.md">Roadmap</a> · <a href="0009-debugging-and-observability.html">← Lesson 9</a> · Lesson 10 · <a href="../reference/compute-and-cost.html">Cheat sheet</a></nav>
+
+<h1>Choosing compute and cost</h1>
+<p class="subtitle">Same task definitions, different engines underneath: which one each of your apps should run on, and roughly what it costs</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 25 minutes)</strong>
+  For any of your apps, you can choose between Fargate, Fargate Spot, Managed Instances and the EC2 launch type, say whether Express Mode or ARM fits, justify the choice, and estimate the monthly Fargate bill on paper.
+</div>
+
+<h2>Warm-up</h2>
+<p>From lessons 1, 5 and 9. Answer from memory before you click.</p>
+<div class="quiz" data-quiz="q-warmup10"></div>
+<script type="application/json" id="q-warmup10">
+{
+  "shuffle": true,
+  "questions": [
+    { "q": "ResourceInitializationError: … unable to retrieve secret from asm … i/o timeout. What do you check first?",
+      "options": ["The execution role's IAM policy", "Network path to Secrets Manager", "The secret's JSON key name", "The container's memory limit setting"], "answer": 1,
+      "why": "A timeout means nothing answered: no public IP, NAT or endpoint for Secrets Manager. A permission problem would say AccessDenied (lesson 9)." },
+    { "q": "ECS Exec fails with a permissions error inside the task. Which role needs the ssmmessages permissions?",
+      "options": ["The execution role", "The service-linked role", "The task role", "The infrastructure role"], "answer": 2,
+      "why": "The SSM agent runs inside your task alongside your code, so it uses the task role (lesson 9)." },
+    { "q": "A Scenario Lab worker on Fargate Spot is being reclaimed. What does it get?",
+      "options": ["Two minutes' warning, then a SIGTERM", "No warning, just an immediate SIGKILL", "Thirty seconds, then the task pauses", "An hour, then ECS migrates it"], "answer": 0,
+      "why": "A two-minute warning (the TerminationNotice), and the containers get SIGTERM. Design workers to stop cleanly and be safe to retry (lesson 5)." },
+    { "q": "On Fargate, what does an ECS cluster actually contain?",
+      "options": ["EC2 servers that you manage yourself", "A grouping of services and tasks", "One load balancer per running service", "A copy of every container image"], "answer": 1,
+      "why": "On Fargate, a cluster is just a grouping and boundary (lesson 1). Where tasks run is decided by the capacity provider, which is today's topic." },
+    { "q": "A planner task failed at 02:00. At 09:00 you can't find it with describe-tasks. Why?",
+      "options": ["Spot tasks are hidden from describe-tasks", "Failed standalone tasks are never recorded", "The log group retention deleted it", "Stopped tasks show about an hour"], "answer": 3,
+      "why": "Stopped tasks show for about an hour. Turn on event capture to keep the history (lesson 9)." }
+  ]
+}
+</script>
+
+<h2>1 · The options, side by side</h2>
+<p>Everything you've learned (task definitions, services, RunTask, scaling) stays the same. What changes is <strong>where the tasks physically run</strong>. That's chosen by the <em>capacity provider</em>, which you met in lesson 4 as <code>capacityProviderStrategy</code>.</p>
+
+<div class="table-wrap"><table>
+  <tr><th></th><th>Who runs the servers</th><th>You pay for</th><th>Can't do / watch out</th></tr>
+  <tr><td><strong>Fargate</strong></td><td>AWS. You never see a server. Each task gets its own isolated environment.</td><td>The vCPU and memory each task asks for, per second (1-minute minimum), from the start of the image pull until the task stops<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup></td><td>No GPUs. At most 32 vCPU and 244 GB per task, in fixed size combinations. No privileged containers.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[2]</a></sup></td></tr>
+  <tr><td><strong>Fargate Spot</strong></td><td>AWS, on spare capacity</td><td>Up to 70% less than Fargate<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup></td><td>Can be taken back with 2 minutes' warning. Linux only (x86 or ARM).</td></tr>
+  <tr><td><strong>Managed Instances</strong></td><td>AWS launches, patches and replaces real EC2 instances in your account; you pick the instance types</td><td>The EC2 instance price plus a management fee per instance. Reserved Instances, Savings Plans and Spot apply to the EC2 part.<sup class="cite"><a href="https://aws.amazon.com/ecs/pricing/">[3]</a></sup></td><td>Several tasks can share one instance, so less isolation than Fargate. You pay for the instance even when it's half empty.</td></tr>
+  <tr><td><strong>EC2 launch type</strong></td><td><strong>You</strong>: an Auto Scaling group of instances, their AMIs, patching and scaling</td><td>The EC2 instances</td><td>The most work. Worth it only for control the others don't give (custom AMIs, special host setup).</td></tr>
+</table></div>
+
+<p><strong>When do you need more than Fargate?</strong> AWS's own list for Managed Instances: GPUs, more than 32 vCPU or 244 GB, privileged containers or host devices, specific instance types, or using reservations and Savings Plans you already have.<sup class="cite"><a href="https://docs.aws.amazon.com/batch/latest/userguide/when-to-use-ecs-managed-instances.html">[4]</a></sup> If none of those apply, AWS's advice is simple: <strong>Fargate</strong>.</p>
+
+<div class="callout">
+  <strong>GPUs no longer mean "manage EC2 yourself"</strong>
+  A deep-learning forecaster that needs an NVIDIA GPU can't run on Fargate (lesson 1). Managed Instances can run it on GPU instances without you running servers, and can scale to zero instances between batch jobs, so you pay only while a job runs.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/run-gpu-batch-inference-on-amazon-ecs-managed-instances-with-scale-to-zero/">[5]</a></sup> The EC2 launch type is now the choice only when you need full control of the host.
+</div>
+
+<h2>2 · Two settings that cut the bill</h2>
+<p>Both live in ECS JSON you already know how to read.</p>
+
+<div class="anno">
+<pre><code>// in the task definition
+<span class="a" data-k="arm">"runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "ARM64" }</span>
+
+// on the service (or in RunTask)
+"capacityProviderStrategy": [
+  <span class="a" data-k="base">{ "capacityProvider": "FARGATE",      "base": 2, "weight": 1 },</span>
+  <span class="a" data-k="weight">{ "capacityProvider": "FARGATE_SPOT", "weight": 3 }</span>
+]</code></pre>
+<div class="anno-notes">
+  <div data-k="arm"><b>ARM64 (AWS Graviton)</b>: on Fargate, ARM costs about <strong>20% less</strong> per vCPU and per GB than x86 (us-east-1: $0.0324 vs $0.0405 per vCPU-hour).<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup> The catch: the image must be built for <code>arm64</code> (or as a multi-architecture image), and every native library inside it needs an ARM build. Pure Python with mainstream wheels (numpy, pandas, scikit-learn) is usually fine. Check commercial solvers and less common compiled packages before you switch.<sup class="cite"><a href="https://aws.amazon.com/fargate/faqs/">[6]</a></sup></div>
+  <div data-k="base"><b><code>base</code></b>: the first 2 tasks always go on regular Fargate. For the Scenario Lab workers, that means some progress is guaranteed even if Spot capacity disappears.</div>
+  <div data-k="weight"><b><code>weight</code></b>: beyond the base, tasks are split 1 : 3 between Fargate and Fargate Spot. With 10 tasks: 2 base, then 8 split as 2 Fargate and 6 Spot. Mostly cheap, never all at risk.</div>
+</div>
+</div>
+<p class="muted">The third lever is commitment: Compute Savings Plans cut Fargate prices by up to 50% in return for committing to a fixed amount of spend per hour for one or three years.<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup> That's only worth it once your usage is steady and predictable.</p>
+
+<h2>3 · Express Mode: a shortcut, not a different engine</h2>
+<p>Express Mode isn't another place to run tasks. It's a quick way to build a <strong>web service on Fargate</strong>. You give it three things: an image, a task execution role and an <em>infrastructure role</em> (which lets ECS create resources for you). It then creates everything from lessons 3, 6, 7 and 9:<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-work.html">[7]</a></sup></p>
+<ul>
+  <li>a task definition with logging and networking, and a service using canary deployments</li>
+  <li>an Application Load Balancer with HTTPS (and an ACM certificate), security groups and a target group</li>
+  <li>auto scaling with a target tracking policy, a log group, and alarms that catch a bad deployment</li>
+</ul>
+<p>These are ordinary resources in your account, so you can change them later: add a task role, a sidecar, scaling policies, a custom domain.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/extending-amazon-ecs-express-mode-to-build-an-optimal-container-environment/">[8]</a></sup> Up to 25 Express services in the same subnets can share one load balancer.<sup class="cite"><a href="https://aws.amazon.com/ecs/faqs/">[9]</a></sup></p>
+<p><strong>Fits:</strong> the forecast API or the agent assistant, which are HTTP services that receive traffic. <strong>Doesn't fit:</strong> the nightly planner, the solve worker and Scenario Lab, which receive no web traffic. Build those the way you learned in lessons 4, 5 and 7.</p>
+<p class="muted">Having done lessons 1 to 9, you'll understand every resource Express Mode creates. That's what it's for: going fast without it being a black box.</p>
+
+<h2>4 · Rough cost on paper</h2>
+<p>Fargate's price has two parts: vCPU-hours and GB-hours. us-east-1 Linux prices, rounded (checked October 2026; always check the <a href="https://aws.amazon.com/fargate/pricing/">pricing page</a> for your Region):<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup></p>
+<pre><code>             per vCPU-hour   per GB-hour
+x86          $0.0405         $0.0044
+ARM64        $0.0324         $0.0036
+
+monthly cost ≈ tasks × hours × (vCPU × vCPU price + GB × GB price)
+always-on    = 24 × 30 = 720 hours a month</code></pre>
+
+<div class="num" data-num="n-cost"></div>
+<script type="application/json" id="n-cost">
+{
+  "title": "Estimate the bill",
+  "intro": "Use the table above. Round to the nearest dollar; small rounding differences are accepted.",
+  "questions": [
+    { "q": "The forecast API runs 2 tasks all month, each 1 vCPU and 2 GB, on x86. Monthly cost?",
+      "answer": 71, "tolerance": 2, "unit": "dollars",
+      "why": "Per task-hour: 1 × 0.0405 + 2 × 0.0044 = $0.0493. × 2 tasks × 720 hours = $71." },
+    { "q": "Same service on ARM64. Monthly cost?",
+      "answer": 57, "tolerance": 2, "unit": "dollars",
+      "why": "1 × 0.0324 + 2 × 0.0036 = $0.0396 per task-hour. × 1,440 = $57: about 20% less, for a rebuild of the image." },
+    { "q": "The nightly MILP planner: 8 vCPU and 32 GB on x86, 90 minutes a night, 30 nights. Monthly cost?",
+      "answer": 21, "tolerance": 1, "unit": "dollars",
+      "why": "8 × 0.0405 + 32 × 0.0044 = $0.4648 an hour. × 1.5 hours × 30 = $21. A big task is cheap when it only runs while it works." },
+    { "q": "Someone runs the same planner as an always-on service, so it 'is ready'. Monthly cost?",
+      "answer": 335, "tolerance": 5, "unit": "dollars",
+      "why": "$0.4648 × 720 hours ≈ $335, 16× more for the same nightly plan. That's lesson 4's point in dollars: run-and-exit work belongs in a job, not a service." }
+  ]
+}
+</script>
+<p class="muted">The Fargate line isn't the whole bill. Load balancers, NAT gateways, public IPv4 addresses, CloudWatch Logs and data transfer are charged separately.<sup class="cite"><a href="https://aws.amazon.com/fargate/pricing/">[1]</a></sup> For a small app, the ALB and NAT gateway can cost more than the tasks. That's one reason VPC endpoints (lesson 3) and shared Express Mode load balancers matter.</p>
+
+<h2>5 · Choosing, in order</h2>
+<pre><code>1. Needs a GPU, more than 32 vCPU / 244 GB, privileged mode or a specific instance type?
+     yes → Managed Instances  (EC2 launch type only if you need full control of the host)
+     no  → Fargate
+2. Safe to interrupt and retry?            yes → Fargate Spot, often with a Fargate base
+3. All native libraries have ARM builds?   yes → ARM64, about 20% off
+4. A web service that receives traffic?    yes → consider Express Mode to set it up
+5. Steady usage for a year or more?        yes → Compute Savings Plan</code></pre>
+
+<h2>Practice: choose the compute</h2>
+<div class="quiz" data-quiz="q-compute"></div>
+<script type="application/json" id="q-compute">
+{
+  "title": "Which compute, and why?",
+  "shuffle": true,
+  "questions": [
+    { "q": "A weekly retraining job for a deep-learning forecaster needs one NVIDIA GPU for 3 hours.",
+      "options": ["Fargate with an ARM64 image", "Fargate Spot with retry policy", "Express Mode with GPU flag", "Managed Instances on GPU instances"], "answer": 3,
+      "why": "Fargate has no GPUs, and Express Mode builds on Fargate. Managed Instances runs GPU instances without you managing servers, and can scale to zero between runs." },
+    { "q": "The Scenario Lab workers: 2 vCPU each, idempotent results, and retries are safe. You want the lowest cost without stalling completely.",
+      "options": ["Fargate base, then mostly Spot", "Only regular Fargate on x86", "EC2 launch with custom AMIs", "Express Mode with canary deployments"], "answer": 0,
+      "why": "Interruptible, retry-safe work suits Spot. A small Fargate base keeps some workers going if Spot capacity runs short." },
+    { "q": "The agent code sandbox runs untrusted, LLM-written Python. Which property of Fargate matters most here?",
+      "options": ["It has the lowest price per vCPU", "It supports ARM64 images for Graviton too", "Each task gets its own isolated environment", "It creates a load balancer for you"], "answer": 2,
+      "why": "Per-task isolation: untrusted code never shares a kernel with other tasks. On Managed Instances, several tasks can share one instance." },
+    { "q": "A huge network-design MILP needs 64 vCPU and 400 GB of memory for one solve.",
+      "options": ["Fargate with the largest task size", "Managed Instances with a large instance", "Fargate Spot with more tasks instead", "Express Mode with higher scaling limits"], "answer": 1,
+      "why": "Fargate tops out at 32 vCPU and 244 GB per task, and one MILP solve can't simply be split across tasks. Managed Instances lets you pick a big enough instance." },
+    { "q": "You want the agent assistant (an HTTP API) live with HTTPS, scaling and safe deployments, as fast as possible.",
+      "options": ["Express Mode, which sets up Fargate", "EC2 launch type behind an ALB", "Managed Instances running large GPU instances", "Standalone tasks started by a scheduler"], "answer": 0,
+      "why": "Express Mode builds the service, ALB with HTTPS, auto scaling, logs and deployment alarms on Fargate in one step, and you can customise them later." },
+    { "q": "The forecast API's image uses only numpy, pandas and scikit-learn. What's the cheapest change with no other trade-off?",
+      "options": ["Move it to Fargate Spot capacity", "Rebuild for ARM64 and switch runtimePlatform", "Move it to EC2 launch type", "Lower its minimum tasks to zero"], "answer": 1,
+      "why": "ARM64 is about 20% cheaper, and these libraries have ARM builds. Spot would risk interruptions to a live API, and min 0 would break availability." },
+    { "q": "The nightly planner uses a commercial solver with no ARM64 build. It runs 90 minutes, and a failed night delays the plan. Which compute?",
+      "options": ["Fargate Spot on ARM64 capacity", "Regular Fargate on x86 architecture", "Managed Instances with GPU instances", "Express Mode with scheduled rule"], "answer": 1,
+      "why": "No ARM build rules out ARM. A long run where failure is costly argues against Spot (unless the solve can checkpoint). It fits within Fargate's sizes, so regular Fargate is enough." },
+    { "q": "Why might a 2-task service cost more for its load balancer and NAT gateway than for its Fargate tasks?",
+      "options": ["Fargate charges extra for all networking", "Load balancers are billed per task", "Those are billed separately, per hour", "NAT gateways double the vCPU price"], "answer": 2,
+      "why": "ALBs and NAT gateways have their own hourly (and data) charges, on top of Fargate. For small apps they can be the bigger part of the bill." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>How does ARM vs x86 affect my Docker image? If it works on my AL2 or Ubuntu dev box, won't it work on ECS with the same distro?</summary>
+<p><strong>The distro doesn't need to match. The CPU architecture does.</strong></p>
+<ul>
+  <li><strong>Distro: carried by the image.</strong> A container brings its own userland from its base image (<code>python:3.12-slim</code> is Debian, whatever the host runs). It shares only the host's Linux <em>kernel</em>. That's why an Ubuntu laptop can run an Alpine container, and why Fargate doesn't let you choose a distro at all, just <code>LINUX</code> plus a CPU architecture.</li>
+  <li><strong>Architecture: baked into the image.</strong> Every compiled binary inside it (the Python interpreter, numpy's C code, a solver library) is machine code for one CPU family. <code>docker build</code> builds for the machine it runs on, so an x86 dev box produces an <code>amd64</code> image, and an Apple Silicon Mac or a Graviton instance produces <code>arm64</code>.</li>
+</ul>
+<p>Your <code>.py</code> files run anywhere, but <code>pip install</code> downloads compiled wheels for the build machine's architecture, so the finished image is single-architecture.</p>
+<p><strong>What a mismatch looks like:</strong> an <code>amd64</code> image in a task with <code>"cpuArchitecture": "ARM64"</code> pulls fine, then fails as soon as it starts: the logs show <code>exec format error</code>, and the task stops with "Essential container in task exited", exit code 1.<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-task-exec-format-error">[10]</a></sup> If you leave out <code>runtimePlatform</code>, Fargate uses x86, so an x86-built image just works.</p>
+<p><strong>Three ways to get an ARM image:</strong></p>
+<pre><code># 1. Build on an ARM machine (Graviton instance, Apple Silicon Mac): plain docker build
+
+# 2. Cross-build from x86 with buildx (emulated: slow for heavy ML builds)
+docker buildx build --platform linux/arm64 -t REPO:TAG --push .
+
+# 3. One multi-architecture image for both
+docker buildx build --platform linux/amd64,linux/arm64 -t REPO:TAG --push .
+
+# check what you've got
+docker buildx imagetools inspect REPO:TAG</code></pre>
+<p>Option 3 pushes an <em>image index</em> under one tag, pointing at one image per architecture. Each task pulls the one that matches its <code>cpuArchitecture</code>, so the same tag works on x86 and ARM. The base image must exist for both (official <code>python</code> images do), and so must every wheel you install.</p>
+<p class="muted">Rule of thumb: the test that counts is running the <em>arm64</em> image, not the x86 one. Run your test suite inside it once before switching a service to ARM64.</p>
+</details>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-cluster-best-practice.html">Amazon ECS cluster capacity</a> (ECS best practices). AWS's own comparison of the compute options and when to choose each. Then try the <a href="https://calculator.aws/">AWS Pricing Calculator</a> with one of your apps.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "how do I build one image for both x86 and ARM?", "what does a Managed Instances capacity provider look like?", "is Fargate Spot ever a good idea for a web API?" or "how do I estimate the NAT gateway part of the bill?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> Lesson 11, the capstone: you design one app end to end, we review it like an architecture review, and you get a first look at infrastructure as code.</p>
+  <p>Cheat sheets: <a href="../reference/compute-and-cost.html">Compute and cost</a> · <a href="../reference/debugging-playbook.html">Debugging playbook</a> · <a href="../reference/running-many-jobs.html">Running many jobs</a> · <a href="../reference/task-definition-fields.html">Task definition fields</a></p>
+  <p class="muted">Sources: [1] <a href="https://aws.amazon.com/fargate/pricing/">AWS Fargate pricing</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">ECS: task definition differences for Fargate</a> · [3] <a href="https://aws.amazon.com/ecs/pricing/">Amazon ECS pricing</a> · [4] <a href="https://docs.aws.amazon.com/batch/latest/userguide/when-to-use-ecs-managed-instances.html">When to use ECS Managed Instances</a> · [5] <a href="https://aws.amazon.com/blogs/containers/run-gpu-batch-inference-on-amazon-ecs-managed-instances-with-scale-to-zero/">AWS blog: GPU batch inference on Managed Instances</a> · [6] <a href="https://aws.amazon.com/fargate/faqs/">AWS Fargate FAQs</a> · [7] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-work.html">ECS: resources created by Express Mode</a> · [8] <a href="https://aws.amazon.com/blogs/containers/extending-amazon-ecs-express-mode-to-build-an-optimal-container-environment/">AWS blog: extending Express Mode</a> · [9] <a href="https://aws.amazon.com/ecs/faqs/">Amazon ECS FAQs</a> · [10] <a href="https://repost.aws/knowledge-center/ecs-task-exec-format-error">re:Post: exec format error</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/numeric.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

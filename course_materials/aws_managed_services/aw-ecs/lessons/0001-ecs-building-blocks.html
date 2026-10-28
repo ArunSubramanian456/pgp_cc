@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECS Building Blocks</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · Lesson 1 · <a href="../reference/ecs-building-blocks.html">Cheat sheet</a></nav>
+
+<h1>The four building blocks of ECS</h1>
+<p class="subtitle">and what Fargate quietly takes off your plate</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 15 minutes)</strong>
+  Given any situation with your app ("it crashed", "I changed the image", "run this script once"), you can say which ECS object is involved: <em>cluster</em>, <em>task definition</em>, <em>task</em> or <em>service</em>. And you can say which jobs are yours and which are AWS's when you run on Fargate.
+</div>
+
+<h2>Start from what you already know</h2>
+<p>You've built Docker images and run them with <code>docker run</code>. ECS doesn't replace any of that. Your image stays the same. ECS answers the questions that come <em>after</em> the image exists: where does it run, how many copies, with how much CPU, and who restarts it when it dies at 2am?</p>
+
+<p>Here's a rough translation from Docker words to ECS words. It's an analogy, not an exact match, but it's a good place to start:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>On your laptop</th><th>In ECS</th></tr>
+  <tr><td>The flags you give <code>docker run</code>: image, ports, env vars, <code>--memory</code></td><td><strong>Task definition</strong>: a saved JSON blueprint of those settings</td></tr>
+  <tr><td>A container you started with <code>docker run</code></td><td><strong>Task</strong>: one running copy of the blueprint (it can hold one or more containers)</td></tr>
+  <tr><td>"Keep 3 of these running and restart any that die"</td><td><strong>Service</strong>: keeps your chosen number of tasks running</td></tr>
+  <tr><td>Your machine</td><td><strong>Cluster</strong>: a logical group your tasks and services live in. On Fargate there's no machine for you to see.</td></tr>
+</table>
+</div>
+
+<h2>The four objects, as AWS defines them</h2>
+
+<h3>1 · Task definition: the blueprint</h3>
+<p>"A blueprint for your application. It is a text file in JSON format that describes the parameters and one or more containers that form your application."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">[1]</a></sup> It holds the image, CPU and memory, ports, logging, the IAM role and more. Every time you change it you get a new numbered <em>revision</em> (<code>my-api:1</code>, <code>my-api:2</code>…). That's how ECS keeps a history of your settings.<sup class="cite"><a href="https://aws.amazon.com/ecs/features/">[2]</a></sup></p>
+
+<h3>2 · Task: one running copy</h3>
+<p>"A task is the instantiation of a task definition within a cluster."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">[1]</a></sup> It's "made of a group of one or more containers that run together", which start and stop together and share <code>localhost</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-cluster-details.html">[3]</a></sup> If you run a task by itself (a <em>standalone task</em>), it runs until it finishes and nobody restarts it. That's what you want for a one-off job like a database migration.</p>
+
+<h3>3 · Service: the thing that keeps tasks alive</h3>
+<p>A service "runs and maintains your desired number of tasks". If a task "fail[s] or stop[s] for any reason, the Amazon ECS service scheduler launches another instance based on your task definition."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">[1]</a></sup> Your web API will almost always run as a service. Services are also what connect to a load balancer and get rolled to new revisions during a deploy.</p>
+
+<h3>4 · Cluster: the grouping</h3>
+<p>"A logical grouping of services or standalone tasks."<sup class="cite"><a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-cluster-details.html">[3]</a></sup> On Fargate, a cluster is mostly a name and a boundary, for example <code>staging</code> vs <code>prod</code>. It isn't a set of servers you look after.</p>
+
+<figure>
+<svg viewBox="0 0 640 300" role="img" aria-label="A cluster contains a service, which keeps three tasks running. All three tasks are launched from one task definition revision.">
+  <style>
+    .b { fill: none; stroke: var(--fg); stroke-width: 1.2; }
+    .t { fill: var(--card); stroke: var(--you); stroke-width: 1.4; }
+    .vm { fill: none; stroke: var(--aws); stroke-dasharray: 4 3; stroke-width: 1.2; }
+    .td { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+    .lbl { fill: var(--fg); font: 15px var(--serif); }
+    .sm { fill: var(--muted); font: italic 12.5px var(--serif); }
+    .mono { fill: var(--fg); font: 12px var(--mono); }
+    .arr { stroke: var(--muted); stroke-width: 1.2; fill: none; marker-end: url(#ah); }
+  </style>
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>
+
+  <rect class="b" x="10" y="10" width="420" height="280" rx="8"/>
+  <text class="lbl" x="24" y="34">Cluster <tspan class="sm">"prod"</tspan></text>
+
+  <rect class="b" x="30" y="50" width="380" height="220" rx="6" stroke-dasharray="2 0"/>
+  <text class="lbl" x="44" y="74">Service <tspan class="sm">desired count = 3</tspan></text>
+
+  <g>
+    <rect class="vm" x="46" y="96" width="110" height="150" rx="6"/>
+    <rect class="t" x="56" y="120" width="90" height="110" rx="5"/>
+    <text class="lbl" x="70" y="145">Task</text>
+    <text class="mono" x="64" y="175">container</text>
+    <text class="mono" x="64" y="192">my-api</text>
+    <text class="sm" x="52" y="112">Fargate microVM</text>
+  </g>
+  <g transform="translate(120 0)">
+    <rect class="vm" x="46" y="96" width="110" height="150" rx="6"/>
+    <rect class="t" x="56" y="120" width="90" height="110" rx="5"/>
+    <text class="lbl" x="70" y="145">Task</text>
+    <text class="mono" x="64" y="175">container</text>
+    <text class="mono" x="64" y="192">my-api</text>
+    <text class="sm" x="52" y="112">Fargate microVM</text>
+  </g>
+  <g transform="translate(240 0)">
+    <rect class="vm" x="46" y="96" width="110" height="150" rx="6"/>
+    <rect class="t" x="56" y="120" width="90" height="110" rx="5"/>
+    <text class="lbl" x="70" y="145">Task</text>
+    <text class="mono" x="64" y="175">container</text>
+    <text class="mono" x="64" y="192">my-api</text>
+    <text class="sm" x="52" y="112">Fargate microVM</text>
+  </g>
+
+  <rect class="td" x="470" y="100" width="160" height="130" rx="6"/>
+  <text class="lbl" x="484" y="126">Task definition</text>
+  <text class="mono" x="484" y="150">my-api:7</text>
+  <text class="mono" x="484" y="172">image  …:v2</text>
+  <text class="mono" x="484" y="190">cpu    256</text>
+  <text class="mono" x="484" y="208">memory 512</text>
+  <path class="arr" d="M468 165 L414 165"/>
+  <text class="sm" x="478" y="252">every task is stamped</text>
+  <text class="sm" x="478" y="268">from this revision</text>
+</svg>
+<figcaption>The service lives in a cluster and keeps three tasks running, all made from revision 7 of the task definition. The dashed boxes are the part Fargate runs for you.</figcaption>
+</figure>
+
+<h2>So what does Fargate change?</h2>
+<p>Every task has to run on <em>some</em> compute. ECS gives you three options: <strong>Fargate</strong> (serverless), <strong>Auto Scaling group</strong> EC2 capacity (you manage the instances), and <strong>ECS Managed Instances</strong> (AWS manages EC2 instances for you).<sup class="cite"><a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-create-capacity-provider.html">[6]</a></sup> With Fargate, "you no longer have to provision, configure, or scale clusters of virtual machines to run containers. This removes the need to choose server types, decide when to scale your clusters, or optimize cluster packing."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">[4]</a></sup></p>
+<p>Three facts about Fargate you'll keep running into:</p>
+<ul>
+  <li><strong>Each task is isolated.</strong> "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface with another task."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">[4]</a></sup> Each task gets its own Fargate resource, so tasks and compute are 1:1.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-cluster-best-practice.html">[7]</a></sup></li>
+  <li><strong>Each task gets its own network card.</strong> Fargate always uses the <code>awsvpc</code> network mode, so every task gets its own elastic network interface, and with it a private IP address in your VPC.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[5]</a></sup> (This matters later for load balancers.)</li>
+  <li><strong>You size the task.</strong> You set CPU and memory at the task level, and they must be one of the valid combinations Fargate supports (for example 256 CPU units with 512 MiB).<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[5]</a></sup> You don't pick a machine.</li>
+</ul>
+
+<div class="callout">
+  <strong>The one-sentence version</strong>
+  <span class="you">You</span> describe the app (task definition) and how many copies to keep (service). <span class="aws">AWS</span> finds the compute, isolates each task, and patches what's underneath.
+</div>
+
+<h2>Practice: recall it, don't reread it</h2>
+<p>Scroll the explanations above out of view first. Struggling to remember is the point, because that effort is what makes it stick.</p>
+
+<div class="quiz" data-quiz="q-objects"></div>
+<script type="application/json" id="q-objects">
+{
+  "title": "Which ECS object is it?",
+  "shuffle": true,
+  "questions": [
+    { "q": "You change your image tag from v1 to v2 and bump CPU from 256 to 512. Which object did you just edit, creating a new revision?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 0,
+      "why": "Image, CPU and memory all live in the task definition blueprint. Editing it creates a new revision, like my-api:8." },
+    { "q": "One of your three API containers crashes at 2am. Which object notices and launches a replacement?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 2,
+      "why": "The service scheduler keeps the desired count running. If a task stops for any reason, it launches a new one from the task definition." },
+    { "q": "You need to run a database migration script once, let it finish, and not have it restarted. What do you run?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 1,
+      "why": "A standalone task runs until it exits. A service would see it stop and start another one, which you don't want for a one-off job." },
+    { "q": "You want your staging workloads kept apart from your production workloads. What do you create for each?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 3,
+      "why": "A cluster is a logical grouping of services and tasks, which makes it a natural boundary like staging vs prod." },
+    { "q": "Which object has a private IP address and is actually running your container right now?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 1,
+      "why": "Only tasks run. On Fargate each task gets its own network interface (awsvpc mode). The task definition is just JSON, and the service only manages tasks." },
+    { "q": "\"Keep 3 copies running behind the load balancer\" is a setting on which object?",
+      "options": ["The task definition", "A single task", "The ECS service", "The ECS cluster"], "answer": 2,
+      "why": "The desired count and the load balancer connection both belong to the service." }
+  ]
+}
+</script>
+
+<div class="quiz" data-quiz="q-owner"></div>
+<script type="application/json" id="q-owner">
+{
+  "title": "On Fargate: your job, or AWS's?",
+  "shuffle": true,
+  "questions": [
+    { "q": "Patching the operating system of the machine your containers run on.",
+      "options": ["You handle it", "AWS handles it"], "answer": 1,
+      "why": "With Fargate there's no host for you to see or patch. That's the main thing \"serverless\" means here." },
+    { "q": "Choosing the CPU and memory each task gets.",
+      "options": ["You handle it", "AWS handles it"], "answer": 0,
+      "why": "You set CPU and memory at the task level in the task definition, using a valid Fargate combination." },
+    { "q": "Building your container image and pushing it to a registry.",
+      "options": ["You handle it", "AWS handles it"], "answer": 0,
+      "why": "Your image is your app. ECS runs it but doesn't build it." },
+    { "q": "Picking EC2 instance types and packing tasks onto them efficiently.",
+      "options": ["You handle it", "AWS handles it"], "answer": 1,
+      "why": "AWS's Fargate docs say you don't have to choose server types or optimise cluster packing." },
+    { "q": "Deciding how many copies of your API should be running.",
+      "options": ["You handle it", "AWS handles it"], "answer": 0,
+      "why": "You set the desired count on the service, and later you can add autoscaling rules. Fargate supplies compute for whatever count you ask for." },
+    { "q": "Isolating each task so it shares no kernel or network interface with other tasks.",
+      "options": ["You handle it", "AWS handles it"], "answer": 1,
+      "why": "Fargate runs each task in its own isolated environment with its own network interface." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p>These are the follow-ups you asked, kept short. <strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>"A task has one or more containers." So is that frontend + backend + database in one task?</summary>
+<p><strong>No.</strong> A task is one copy of <em>one</em> part of your app. The extra containers in a task are <strong>sidecars</strong>, small helpers like a log router, telemetry agent or proxy that enhance that one container. AWS: "Don't use this feature to add multiple application containers to the same task definition because this prevents copies of each application scaling separately."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/application.html">[8]</a></sup></p>
+<pre><code>✓ Task (forecast-api)          ✗ Task
+  ├── api                        ├── frontend
+  └── otel-collector (sidecar)   ├── backend
+                                 └── postgres</code></pre>
+<p>Bundling breaks things because containers in a task start, stop and scale <em>together</em>. Five tasks would mean five frontends, five backends and five separate databases. Instead, give each part its own <strong>task definition + service</strong>. The database usually lives outside ECS (e.g. RDS), because Fargate task storage is temporary.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[5]</a></sup></p>
+<p><em>Rule of thumb:</em> put two containers in one task only if they always run 1:1 <strong>and</strong> it's fine for them to restart together.</p>
+</details>
+
+<details class="qa">
+<summary>If a task can hold several containers, why would I ever need multiple tasks?</summary>
+<p>Multiple tasks are <strong>identical copies</strong> of the same thing. You run them for <strong>load</strong> (three copies behind a load balancer handle about three times the traffic) and for <strong>resilience</strong> (if one copy or one Availability Zone fails, the others keep serving while the service replaces it).</p>
+</details>
+
+<details class="qa">
+<summary>What does the <code>:3</code> in <code>frontend:3</code> mean?</summary>
+<p>It's <code>family:revision</code>, so <strong>revision 3</strong> of the task definition family <code>frontend</code>. Revisions start at 1 and "always increase by one", even if you deregister old ones.<sup class="cite"><a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-task-definition/-builder/revision.html">[9]</a></sup> You never edit a revision. Any change registers a new one. A service points at one exact revision, so rolling back means pointing it back at the previous one.</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>Example</th><th>Versions…</th></tr>
+<tr><td>Image tag</td><td><code>my-api:v2</code></td><td>your <strong>code</strong></td></tr>
+<tr><td>Task def revision</td><td><code>api:7</code></td><td>the <strong>settings around the code</strong> (image, CPU/memory, env, roles)</td></tr>
+</table></div>
+<p>These are independent. Changing only an env var creates a new revision but needs no image rebuild.</p>
+</details>
+
+<details class="qa">
+<summary>Can I say "always at least 2 copies, up to 4 at peak"? <span class="muted">(preview of a later lesson)</span></summary>
+<p>Yes. That's <strong>Service Auto Scaling</strong> with a minimum of 2 and a maximum of 4. "The desired count doesn't go below the minimum or above the maximum."<sup class="cite"><a href="https://repost.aws/knowledge-center/ecs-fargate-service-auto-scaling">[10]</a></sup> You don't say "it's peak now". You set a <strong>target-tracking</strong> policy (e.g. average CPU 60%, or requests per task), and ECS adds and removes tasks to stay near it. It scales out fast and scales in gradually.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">[11]</a></sup></p>
+<p>Notes for ML inference:</p>
+<ul>
+  <li><strong>No GPUs on Fargate.</strong><sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[5]</a></sup></li>
+  <li>Loading the model makes startup slow, so keep a minimum of 2 and use a health-check grace period.</li>
+  <li>Your <code>/health</code> endpoint is what the load balancer checks before it sends a task traffic.</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>How do my own apps (forecasting, MILP, agents) map onto ECS?</summary>
+<p>By the <em>shape</em> of the work:</p>
+<ul>
+  <li><strong>Request/response</strong> (forecast API, quick what-if LP) → <strong>service</strong> behind a load balancer.</li>
+  <li><strong>Run, finish, exit</strong> (nightly MILP planner, weekly retraining) → <strong>standalone or scheduled task</strong>.</li>
+  <li><strong>Bursty, slow, many</strong> (Scenario Lab: 200 what-if MILPs or forecasts, compared against a baseline) → <strong>queue + worker service</strong>, all running the <em>same</em> task definition with different inputs.</li>
+</ul>
+<p>Choosing the right shape is half of designing an app on ECS. Later lessons cover each one.</p>
+</details>
+
+<div class="quiz" data-quiz="q-followups"></div>
+<script type="application/json" id="q-followups">
+{
+  "title": "Check your follow-ups",
+  "intro": "These are the quick checks from our conversation. Answer from memory.",
+  "shuffle": true,
+  "questions": [
+    { "q": "Your service runs api:7. You change only the LOG_LEVEL env var from info to debug. What happens?",
+      "options": ["New revision api:8 registered", "Revision api:7 edited directly", "Image must be rebuilt first", "Nothing changes inside ECS"], "answer": 0,
+      "why": "Any change to the task definition registers a new revision. The image (your code) is unchanged, so there's no rebuild. You then point the service at api:8." },
+    { "q": "Frontend and API are bundled in one task definition. At peak the API needs 6 copies but the frontend only needs 2. How many frontend containers run?",
+      "options": ["Two frontend containers run", "Six frontend containers run", "Four frontend containers run", "Zero frontend containers run"], "answer": 1,
+      "why": "Every task carries one of each container, so 6 tasks means 6 frontends, and 4 of them are wasted. That's why each part gets its own task definition and service." },
+    { "q": "A service has min 2 and max 4 tasks. A traffic spike would justify 6 tasks by CPU. How many run?",
+      "options": ["ECS runs six tasks", "ECS runs four tasks", "ECS runs two tasks", "ECS stops the service"], "answer": 1,
+      "why": "The desired count never goes above the maximum. The extra load is shared by 4 busy tasks, so expect higher latency. Raise the max or use larger tasks if this happens often." },
+    { "q": "Your nightly 40-minute MILP planner runs as a service with desired count 1. What happens when the solve finishes and the task exits?",
+      "options": ["Service starts it again", "Service scales to zero", "Service deletes the cluster", "Service waits until tomorrow"], "answer": 0,
+      "why": "A service replaces any task that stops, so your planner would re-solve all day and you'd pay for it. Run-and-exit work should be a standalone or scheduled task." },
+    { "q": "Your forecast API needs a log-shipping helper running next to every copy. Where does it go?",
+      "options": ["Sidecar in same task", "Separate ECS service entirely", "Baked inside API container", "Its own dedicated cluster"], "answer": 0,
+      "why": "It must run 1:1 with each API copy and can restart with it. That's exactly the sidecar case." },
+    { "q": "Scenario Lab stores baseline and scenario results in Postgres. Where should Postgres usually live?",
+      "options": ["Managed database like RDS", "Container inside every task", "Sidecar beside the API", "Task ephemeral storage volume"], "answer": 0,
+      "why": "Tasks are disposable and their storage is temporary. Use a managed database so the data survives task restarts and is shared by every task." }
+  ]
+}
+</script>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">Amazon ECS task definitions</a> in the AWS ECS Developer Guide. It's short, and it lists every kind of setting a task definition holds. That list is a preview of lesson 2.
+</div>
+
+<div class="ask">
+  Anything unclear? Ask me, your teacher, in the terminal. For example: "why would I ever run a task without a service?" or "how is a cluster different on EC2?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> <a href="0002-reading-a-task-definition.html">Lesson 2</a>, reading a real Fargate task definition field by field (image, cpu/memory, ports, logs, and the two IAM roles people mix up).</p>
+  <p>Keep the <a href="../reference/ecs-building-blocks.html">ECS building blocks cheat sheet</a> handy.</p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html">ECS task definitions</a> · [2] <a href="https://aws.amazon.com/ecs/features/">ECS features</a> · [3] <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-cluster-details.html">ECS console help: cluster details</a> · [4] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html">Architect for AWS Fargate</a> · [5] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">Task definition differences for Fargate</a> · [6] <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-create-capacity-provider.html">Create capacity providers</a> · [7] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-cluster-best-practice.html">ECS cluster capacity</a> · [8] <a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/application.html">ECS best practices: running your application</a> · [9] <a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-task-definition/-builder/revision.html">ECS API: TaskDefinition.revision</a> · [10] <a href="https://repost.aws/knowledge-center/ecs-fargate-service-auto-scaling">re:Post: ECS service auto scaling on Fargate</a> · [11] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">Target tracking scaling for ECS</a></p>
+</footer>
+</main>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

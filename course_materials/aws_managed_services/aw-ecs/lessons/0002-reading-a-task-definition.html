@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reading Task Definitions</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+<nav class="crumbs"><a href="../MISSION.md">Mission</a> · <a href="0001-ecs-building-blocks.html">← Lesson 1</a> · Lesson 2 · <a href="../reference/task-definition-fields.html">Cheat sheet</a></nav>
+
+<h1>Reading a Fargate task definition</h1>
+<p class="subtitle">field by field, using a nightly MILP planner</p>
+
+<div class="goal">
+  <strong>Your win for this lesson (about 20 minutes)</strong>
+  You can read any Fargate task definition and say what every field does. You'll also be able to tell the two IAM roles apart, which is the mistake behind a large share of "my task won't start" and "AccessDenied" errors.
+</div>
+
+<h2>The app: a nightly replenishment planner</h2>
+<p>Every night at 1am, a MILP decides <em>how much of each SKU to order for each distribution centre</em> over the next 12 weeks. It reads demand forecasts and inventory from S3, solves with HiGHS, writes the plan back to S3, and exits. This is idea #4 from your idea bank.</p>
+<p>From lesson 1, you already know two things about it:</p>
+<ul>
+  <li>It runs, finishes and exits, so it's a <strong>task</strong>, not a service. A service would restart it all day.</li>
+  <li>The JSON below is its <strong>task definition</strong>: the blueprint every nightly run is stamped from.</li>
+</ul>
+<p>AWS's reference splits a task definition into the family, IAM roles, network mode, container definitions, volumes and capacity. Only <code>family</code> and <code>containerDefinitions</code> are always required.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> On Fargate, a few more become mandatory: <code>networkMode</code> must be <code>awsvpc</code>, and task-level <code>cpu</code> and <code>memory</code> are required.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup></p>
+
+<h2>Read it in two layers</h2>
+<p>A task definition has two layers:</p>
+<ul>
+  <li><strong>Task level (the outer part):</strong> <em>how big is the box, what's it called, and what is it allowed to do?</em></li>
+  <li><strong><code>containerDefinitions</code> (the inner part):</strong> <em>what runs inside the box?</em> This is the part that looks like a <code>docker run</code> command.</li>
+</ul>
+<p><strong>Before clicking anything, try to say out loud what each highlighted field does.</strong> Then click it to check.</p>
+
+<div class="anno">
+<pre><code>{
+  <span class="a" data-k="family">"family": "replenishment-planner",</span>
+  <span class="a" data-k="compat">"requiresCompatibilities": ["FARGATE"],</span>
+  <span class="a" data-k="net">"networkMode": "awsvpc",</span>
+  <span class="a" data-k="platform">"runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "X86_64" },</span>
+  <span class="a" data-k="size">"cpu": "8192",
+  "memory": "32768",</span>
+  <span class="a" data-k="eph">"ephemeralStorage": { "sizeInGiB": 50 },</span>
+  <span class="a" data-k="exec">"executionRoleArn": "arn:aws:iam::111122223333:role/ecsTaskExecutionRole",</span>
+  <span class="a" data-k="taskrole">"taskRoleArn": "arn:aws:iam::111122223333:role/replenishment-planner-task",</span>
+  <span class="a" data-k="cdefs">"containerDefinitions": [</span>
+    {
+      <span class="a" data-k="name">"name": "solver",</span>
+      <span class="a" data-k="image">"image": "111122223333.dkr.ecr.us-east-1.amazonaws.com/replenishment-planner:2026.10.1",</span>
+      <span class="a" data-k="essential">"essential": true,</span>
+      <span class="a" data-k="command">"command": ["python", "-m", "planner.solve", "--horizon-weeks", "12"],</span>
+      <span class="a" data-k="env">"environment": [
+        { "name": "SOLVER", "value": "highs" },
+        { "name": "SOLVER_THREADS", "value": "8" },
+        { "name": "OUTPUT_S3", "value": "s3://acme-plans/replenishment/" }
+      ],</span>
+      <span class="a" data-k="secrets">"secrets": [
+        { "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:111122223333:secret:planner-db:password::" }
+      ],</span>
+      <span class="a" data-k="logs">"logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/replenishment-planner",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "planner"
+        }
+      },</span>
+      <span class="a" data-k="stop">"stopTimeout": 120</span>
+    }
+  ]
+  <span class="a" data-k="noports">/* notice: no "portMappings" anywhere */</span>
+}</code></pre>
+<div class="anno-notes">
+  <div data-k="family"><b><code>family</code></b>: the name of the blueprint. Each registration gets the next revision number, so this one becomes <code>replenishment-planner:1</code>, then <code>:2</code>, and so on. Required.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup></div>
+  <div data-k="compat"><b><code>requiresCompatibilities</code></b>: tells ECS to check, at registration time, that every parameter you used is valid on Fargate. If it isn't, registration fails straight away, for example if you ask for a GPU.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> It's better to fail at registration than at 1am.</div>
+  <div data-k="net"><b><code>networkMode</code></b>: on Fargate this must be <code>awsvpc</code>, which gives each task its own network interface.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> Lesson 3 is about what this means for subnets and security groups.</div>
+  <div data-k="platform"><b><code>runtimePlatform</code></b>: the OS family and CPU architecture. The defaults are <code>LINUX</code> and <code>X86_64</code>. Linux tasks can also use <code>ARM64</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> Your image must be built for whichever architecture you choose.</div>
+  <div data-k="size"><b><code>cpu</code> / <code>memory</code></b>: the size of the whole task. Both are required on Fargate and must be a valid pair.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[2]</a></sup> <code>8192</code> CPU units = 8 vCPU, which allows 16 to 60 GB in 4 GB steps, so <code>32768</code> MiB (32 GB) is valid. A MILP with a big branch-and-bound tree is usually memory-hungry, so size memory for your largest instance. Note that <code>SOLVER_THREADS</code> = 8 matches the 8 vCPUs.</div>
+  <div data-k="eph"><b><code>ephemeralStorage</code></b>: scratch disk. Fargate gives at least 20 GiB by default, and you can raise it to 200 GiB. Your container image is stored on the same disk, and the disk is wiped when the task stops.<sup class="cite"><a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-taskdef-ephemeralstorage.html">[3]</a></sup> That's why the plan goes to S3, not <code>/tmp</code>.</div>
+  <div data-k="exec"><b><code>executionRoleArn</code></b>: used by <span class="aws">ECS/Fargate</span> to get the task started. It pulls the private ECR image, sends logs to CloudWatch and fetches the <code>secrets</code>. Its credentials "aren't directly accessible by the containers in the task."<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html">[4]</a></sup></div>
+  <div data-k="taskrole"><b><code>taskRoleArn</code></b>: used by <span class="you">your Python code</span>. When <code>boto3</code> reads forecasts from S3 or writes the plan, it uses this role's permissions.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> Give each app its own role with only what it needs.</div>
+  <div data-k="cdefs"><b><code>containerDefinitions</code></b>: the list of containers in the task. There's just one here, because this job doesn't need a sidecar (lesson 1). Required.</div>
+  <div data-k="name"><b><code>name</code></b>: the container's name inside the task. It appears in log stream names and in error messages.</div>
+  <div data-k="image"><b><code>image</code></b>: your Docker image in ECR. It has an <em>explicit tag</em> (<code>2026.10.1</code>), not <code>latest</code>, so every night runs exactly the code you think it runs. This also matters for your Scenario Lab baselines.</div>
+  <div data-k="essential"><b><code>essential</code></b>: if an essential container stops, ECS stops every other container in the task. If you leave this out, the container counts as essential, and every task needs at least one essential container.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> You'd set <code>false</code> on a sidecar the app can survive without.</div>
+  <div data-k="command"><b><code>command</code></b>: the command the container runs, replacing the image's <code>CMD</code>. It's the same as the <code>COMMAND</code> part of <code>docker run</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> Each argument goes in its own string.</div>
+  <div data-k="env"><b><code>environment</code></b>: plain environment variables, the same as <code>docker run -e</code>. Use them for configuration, never for passwords, because anyone who can read the task definition can see them.</div>
+  <div data-k="secrets"><b><code>secrets</code></b>: when the task starts, ECS fetches the value from Secrets Manager (or SSM Parameter Store) and sets it as <code>DB_PASSWORD</code>. The task definition only holds the ARN. Fetching the value is the <em>execution</em> role's job.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html">[4]</a></sup> The <code>:password::</code> ending picks one key out of a JSON secret.</div>
+  <div data-k="logs"><b><code>logConfiguration</code></b>: <code>awslogs</code> sends your container's stdout and stderr to CloudWatch Logs. Group and region are required, and on Fargate the stream prefix is required too. Streams are named <code>prefix/container-name/task-id</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/sdk-for-ruby/v3/api/Aws/ECS/Types/LogConfiguration.html">[5]</a></sup> Your solver's progress logs end up here.</div>
+  <div data-k="stop"><b><code>stopTimeout</code></b>: when the task is stopped, ECS waits this many seconds for the container to exit on its own before killing it. The default is 30 and the maximum is 120.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> Handle the stop signal (SIGTERM) in your solver so it saves its best solution so far to S3 in that window. This comes up again with Fargate Spot.</div>
+  <div data-k="noports"><b>No <code>portMappings</code></b>: nothing ever calls this job. It reaches out to S3 and nothing connects in. A forecast <em>API</em> would map a port, such as 8000 for FastAPI. Leaving out a field you don't need is a design decision too.</div>
+</div>
+</div>
+
+<h2>The mix-up that costs people a day: two roles</h2>
+<figure>
+<svg viewBox="0 0 640 230" role="img" aria-label="The execution role is used by ECS and Fargate before and around your container: pull image, send logs, fetch secrets. The task role is used by your code inside the container: read and write S3.">
+  <style>
+    .bx { fill: var(--card); stroke: var(--fg); stroke-width: 1.2; }
+    .ex { fill: var(--accent-soft); stroke: var(--aws); stroke-width: 1.4; }
+    .tr { fill: none; stroke: var(--you); stroke-width: 1.4; }
+    .l { fill: var(--fg); font: 15px var(--serif); }
+    .s { fill: var(--muted); font: italic 12.5px var(--serif); }
+    .ea { fill: var(--aws); font: 600 13px var(--serif); }
+    .ya { fill: var(--you); font: 600 13px var(--serif); }
+    .ln { stroke: var(--muted); stroke-width: 1.1; fill: none; marker-end: url(#ah2); }
+  </style>
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>
+
+  <rect class="ex" x="10" y="20" width="250" height="190" rx="8"/>
+  <text class="ea" x="24" y="44">executionRoleArn</text>
+  <text class="s" x="24" y="62">used by ECS / Fargate, before and around your code</text>
+  <text class="l" x="34" y="98">① pull image from ECR</text>
+  <text class="l" x="34" y="128">② fetch secrets → env vars</text>
+  <text class="l" x="34" y="158">③ ship stdout to CloudWatch</text>
+  <text class="s" x="24" y="192">your code can't use these credentials</text>
+
+  <rect class="bx" x="300" y="20" width="330" height="190" rx="8"/>
+  <text class="l" x="314" y="44">Task (your container)</text>
+  <rect class="tr" x="320" y="62" width="290" height="120" rx="6"/>
+  <text class="ya" x="334" y="84">taskRoleArn</text>
+  <text class="s" x="334" y="102">used by your Python code via boto3</text>
+  <text class="l" x="344" y="132">s3.get_object(forecasts)</text>
+  <text class="l" x="344" y="160">s3.put_object(plan)</text>
+  <path class="ln" d="M262 115 L318 115"/>
+</svg>
+<figcaption>Rule of thumb: if the error happens <em>before your code runs</em> (image pull, secrets, logs), check the <span class="aws">execution role</span>. If your code gets <code>AccessDenied</code>, check the <span class="you">task role</span>. <a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/security-iam-roles.html">[6]</a></figcaption>
+</figure>
+
+<h2>Practice</h2>
+<p>Scroll the JSON out of view first.</p>
+
+<div class="quiz" data-quiz="q-roles"></div>
+<script type="application/json" id="q-roles">
+{
+  "title": "Which role needs the permission?",
+  "intro": "These mix in your other apps on purpose.",
+  "shuffle": true,
+  "questions": [
+    { "q": "Replenishment planner: your code gets AccessDenied calling s3.put_object to write the plan.",
+      "options": ["The task role", "The execution role"], "answer": 0,
+      "why": "Your code is making the call through boto3, so it runs with the task role. Add s3:PutObject on that bucket prefix to the task role." },
+    { "q": "Forecast API: the task never starts, because Fargate can't pull your private ECR image (access denied).",
+      "options": ["The task role", "The execution role"], "answer": 1,
+      "why": "Pulling the image happens before your container exists. ECS/Fargate does it using the execution role." },
+    { "q": "Planner: the task fails at startup because ECS can't retrieve DB_PASSWORD from Secrets Manager.",
+      "options": ["The task role", "The execution role"], "answer": 1,
+      "why": "Values in the secrets field are fetched by ECS and injected as env vars before your code runs. That's the execution role's job, so it needs secretsmanager:GetSecretValue." },
+    { "q": "Agentic data-exploration assistant: your agent code calls Amazon Bedrock to plan its next step and gets AccessDenied.",
+      "options": ["The task role", "The execution role"], "answer": 0,
+      "why": "Your application code is calling an AWS API at runtime, so it needs the task role." },
+    { "q": "Scenario Lab worker: the task runs fine, but nothing ever appears in CloudWatch Logs, and the events mention log permissions.",
+      "options": ["The task role", "The execution role"], "answer": 1,
+      "why": "With the awslogs driver, ECS/Fargate ships stdout to CloudWatch on your container's behalf, using the execution role." },
+    { "q": "Weekly retraining job: your training script downloads last year's sales parquet from S3 and gets AccessDenied.",
+      "options": ["The task role", "The execution role"], "answer": 0,
+      "why": "Your code calls S3, so it uses the task role. The execution role can't help here, because its credentials aren't available to containers." }
+  ]
+}
+</script>
+
+<div class="quiz" data-quiz="q-fields"></div>
+<script type="application/json" id="q-fields">
+{
+  "title": "Which field fixes it?",
+  "shuffle": true,
+  "questions": [
+    { "q": "Your MILP planner writes 60 GB of intermediate LP/MPS files and fails with \"no space left on device\".",
+      "options": ["Raise ephemeral storage", "Raise task CPU", "Add port mappings", "Change CPU architecture"], "answer": 0,
+      "why": "Scratch disk is ephemeralStorage: at least 20 GiB by default, configurable up to 200 GiB. Remember the image uses some of it too, and it's wiped when the task stops." },
+    { "q": "ECS stops your planner mid-solve, and it gets killed before it can save its best solution so far to S3.",
+      "options": ["Raise stopTimeout to 120", "Raise startTimeout to 120", "Raise task memory limit", "Set essential to false"], "answer": 0,
+      "why": "stopTimeout is how long ECS waits after the stop signal before killing the container. The default is 30s and the maximum is 120s. Your code still has to catch SIGTERM and save." },
+    { "q": "Which of these is a valid Fargate task size?",
+      "options": ["8192 CPU, 32 GB", "8192 CPU, 8 GB", "256 CPU, 4 GB", "1024 CPU, 1 GB"], "answer": 0,
+      "why": "8 vCPU allows 16 to 60 GB in 4 GB steps. 256 allows 512 MiB to 2 GB, and 1024 allows 2 to 8 GB. Fargate only accepts pairs from its table." },
+    { "q": "Why does the planner's task definition have no portMappings at all?",
+      "options": ["Nothing ever calls the job", "Fargate forbids port mappings", "Ports go in environment vars", "ECS assigns ports automatically"], "answer": 0,
+      "why": "It's a batch job that only reaches out (to S3). An API like your forecast service would map a port so the load balancer can reach it." },
+    { "q": "Scenario Lab: you want to run the planner 200 times with different demand multipliers, without making 200 task definitions.",
+      "options": ["Override environment at run", "Register new family each", "Edit revision in place", "Rebuild image per scenario"], "answer": 0,
+      "why": "When you run a task, you can override container settings such as environment variables and the command for that one run. It's one blueprint with many inputs." },
+    { "q": "You leave out the essential field on your only container. What does ECS assume?",
+      "options": ["Container is essential", "Container is optional", "Task fails validation", "Fargate decides randomly"], "answer": 0,
+      "why": "If essential is omitted, the container is assumed to be essential, and every task must have at least one." }
+  ]
+}
+</script>
+
+<h2>Your questions from this session</h2>
+<p><strong>Try to answer each one out loud before opening it.</strong></p>
+
+<details class="qa">
+<summary>What are the <code>networkMode</code> options? Is <code>awsvpc</code> the default VPC? Can I use my own private VPC and subnets?</summary>
+<p>There are four modes. If you set none, the default is <code>bridge</code>, but Fargate <em>requires</em> <code>awsvpc</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-register-task-definition-request/-builder/network-mode.html">[8]</a></sup></p>
+<div class="table-wrap"><table>
+<tr><th>Mode</th><th>What happens</th><th>Where allowed</th></tr>
+<tr><td><code>awsvpc</code></td><td>Each task gets its <strong>own network interface</strong>, private IP and security groups, as if it were its own little server.</td><td>Fargate (only option), EC2, Managed Instances</td></tr>
+<tr><td><code>bridge</code></td><td>Tasks share the host's interface through a virtual Docker bridge (like Docker on your laptop).</td><td>EC2 Linux only</td></tr>
+<tr><td><code>host</code></td><td>Containers sit directly on the host's network, with no isolation.</td><td>EC2, Managed Instances<sup class="cite"><a href="https://aws.amazon.com/ecs/faqs/">[9]</a></sup></td></tr>
+<tr><td><code>none</code></td><td>No external networking.</td><td>EC2 Linux</td></tr>
+</table></div>
+<p><strong><code>awsvpc</code> is not "the default VPC".</strong> It's a <em>mode</em>, meaning "give this task its own network interface in a VPC". <em>Which</em> VPC isn't in the task definition at all. You choose it when you <strong>run the task or create the service</strong>, in <code>networkConfiguration</code>: a list of subnets (all in one VPC), security groups and <code>assignPublicIp</code>. It's required for <code>awsvpc</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup> So yes, use <strong>your own VPC and private subnets</strong>. That's the normal production setup.</p>
+<pre><code>Task definition:   "networkMode": "awsvpc"            ← the HOW
+RunTask / service: networkConfiguration.awsvpcConfiguration = {
+                     subnets:        [private-a, private-b],
+                     securityGroups: [sg-planner],
+                     assignPublicIp: DISABLED }      ← the WHERE</code></pre>
+<p><em>One catch:</em> a task still needs a network path to ECR (to pull its image), CloudWatch and S3. In a public subnet it needs a public IP.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">[2]</a></sup> In a private subnet it needs a NAT gateway or VPC endpoints. That's lesson 3.</p>
+</details>
+
+<details class="qa">
+<summary>My Dockerfile already has <code>CMD</code>. Why repeat it in the task definition?</summary>
+<p><strong>You don't have to.</strong> <code>command</code> is optional. If you leave it out, the container runs the image's <code>CMD</code>. If you set it, it <em>replaces</em> <code>CMD</code>, just like adding a command to the end of <code>docker run</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">[1]</a></sup> (<code>entryPoint</code> does the same for <code>ENTRYPOINT</code>.)</p>
+<p>Reasons to set it anyway:</p>
+<ul>
+<li><strong>One image, several jobs.</strong> The same <code>replenishment-planner</code> image can be <code>planner.solve</code> in one task definition and <code>planner.validate_inputs</code> in another, or an API and a queue worker built from one codebase.</li>
+<li><strong>Visible in one place.</strong> Whoever reads the task definition sees exactly what runs, without opening the Dockerfile.</li>
+<li><strong>Per-run arguments.</strong> <code>RunTask</code> can override <code>command</code> for a single run, e.g. <code>--horizon-weeks 26</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup></li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>How does ECS pass environment variables to my container? And how do I run 200 scenarios by changing them?</summary>
+<p><strong>How it works:</strong> when ECS creates the container, it hands the variables to the container runtime, the same as <code>docker run -e KEY=value</code>. Your code just reads <code>os.environ["SOLVER_THREADS"]</code>. If the same name is set in more than one place, the most specific one wins:</p>
+<pre><code>run-time override  &gt;  task definition "environment"  &gt;  Dockerfile ENV</code></pre>
+<p><strong>For 200 scenarios, don't edit the task definition 200 times.</strong> That would register 200 revisions, and none of them would be your baseline. Keep <strong>one pinned revision</strong> and call <code>RunTask</code> 200 times, each with an <code>environment</code> override. Overrides can change existing variables or add new ones.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup></p>
+<pre><code>import boto3
+ecs = boto3.client("ecs")
+
+for sc in scenarios:   # e.g. {"id": "demand_x1.2_dc3_cap-30"}
+    ecs.run_task(
+        cluster="planning",
+        taskDefinition="replenishment-planner:3",      # pinned = same code+settings as baseline
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": PRIVATE_SUBNETS, "securityGroups": [SG_PLANNER],
+            "assignPublicIp": "DISABLED"}},
+        overrides={"containerOverrides": [{
+            "name": "solver",                           # must match the container name
+            "environment": [
+                {"name": "SCENARIO_ID", "value": sc["id"]},
+                {"name": "SCENARIO_S3", "value": f"s3://acme-scenarios/batch-42/{sc['id']}.json"},
+            ]}]},
+        startedBy="scenario-batch-42",                 # lets you list this batch's tasks later
+    )</code></pre>
+<p>Two design rules come from limits in the API:</p>
+<ul>
+<li><strong>Pass a pointer, not the data.</strong> All overrides together are limited to <strong>8,192 characters</strong>, JSON included.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup> Put the scenario's demand multipliers and constraint toggles in an S3 JSON file, and pass only its key.</li>
+<li><strong>Tag the batch.</strong> <code>startedBy</code> (up to 128 characters) lets you find every task in batch 42 afterwards.<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup></li>
+</ul>
+<p>Firing 200 eight-vCPU tasks at once can also hit your account's Fargate vCPU quota. That's why Scenario Lab will later use a queue or Step Functions to limit how many run at a time.</p>
+</details>
+
+<details class="qa">
+<summary>What is <code>stopTimeout</code> actually for? When does it apply?</summary>
+<p><strong>Yes, it's wrap-up time.</strong> When ECS stops a task, it sends each container <code>SIGTERM</code> ("please shut down"). If the container hasn't exited after <code>stopTimeout</code> seconds (default 30, max 120), it sends <code>SIGKILL</code>, which kills it instantly with no cleanup.<sup class="cite"><a href="https://aws.amazon.com/blogs/compute/deep-dive-into-fargate-spot-to-run-your-ecs-tasks-for-up-to-70-less/">[11]</a></sup> In that window your code can save its best solution so far, flush logs, or finish in-flight requests.</p>
+<p><strong>It applies whenever ECS stops a task, not only when you do it by hand:</strong><sup class="cite"><a href="https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/">[12]</a></sup></p>
+<ul>
+<li>you call <code>StopTask</code> or click Stop in the console</li>
+<li>a <strong>deployment</strong> replaces old tasks with a new revision</li>
+<li><strong>scale-in</strong>, when autoscaling goes from 4 tasks to 2</li>
+<li>a <strong>Fargate Spot interruption</strong> (2-minute warning)</li>
+<li>the task's <strong>essential</strong> container stops, so ECS stops the other containers</li>
+</ul>
+<p><strong>It doesn't apply</strong> when your process finishes and exits on its own. Your nightly solve completing normally needs no stop signal. And if the process is killed some other way, for example it runs out of memory, there's no graceful window.</p>
+<p>For a service behind a load balancer, ECS <em>first</em> removes the task from the load balancer, so it gets no new requests, <em>then</em> sends SIGTERM.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/">[12]</a></sup></p>
+<pre><code>import signal, sys
+def on_sigterm(signum, frame):
+    save_incumbent_to_s3()      # best feasible plan so far + MIP gap
+    sys.exit(0)
+signal.signal(signal.SIGTERM, on_sigterm)</code></pre>
+<p>Since 120 seconds is the ceiling, a 40-minute MILP can't wait for a stop to finish the solve. It has to <em>checkpoint and exit quickly</em>.<sup class="cite"><a href="https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/">[12]</a></sup></p>
+</details>
+
+<details class="qa">
+<summary>Network modes in plain English: what do <code>bridge</code>, <code>host</code> and <code>none</code> actually mean?</summary>
+<p>Picture an <strong>EC2 server as an apartment building</strong> and each <strong>task as a flat</strong>. Example: two copies of your forecast API on one server, both listening on port 8000.</p>
+<pre><code>awsvpc  every flat has its own street address
+        10.0.1.15:8000 → copy 1     10.0.1.16:8000 → copy 2     (own security group each)
+
+bridge  one building address + a mailroom that forwards
+        10.0.1.10:32768 → copy 1:8000    10.0.1.10:32769 → copy 2:8000   (one SG for the building)
+
+host    no flats, everyone stands in the lobby
+        10.0.1.10:8000 → copy 1     10.0.1.10:8000 → copy 2  ✗ port already taken
+
+none    a flat with no doors or windows: only localhost</code></pre>
+<ul>
+<li><strong>bridge</strong> is Docker-on-your-laptop style (<code>-p 32768:8000</code>). Tasks share the server's IP and security groups. ECS can pick a random outside port (a dynamic port).<sup class="cite"><a href="https://aws.amazon.com/blogs/compute/migrating-your-amazon-ecs-containers-to-aws-fargate/">[13]</a></sup></li>
+<li><strong>host</strong> is fast, but with port mappings you can't run two copies of the same task on one server.<sup class="cite"><a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-register-task-definition-request/-builder/network-mode.html">[8]</a></sup></li>
+<li><strong>On Fargate there's no building you manage, so it's always awsvpc.</strong> You only need to recognise the others in older tutorials and EC2 setups. A hint: <code>hostPort</code> or dynamic ports means it's bridge.</li>
+</ul>
+</details>
+
+<details class="qa">
+<summary>What is <code>RunTask</code>?</summary>
+<p>The ECS API action that "starts a new task using the specified task definition".<sup class="cite"><a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">[10]</a></sup> It's the "run this once, now" button, and it's how standalone tasks start. You can call it from the console (<em>Run new task</em>), the CLI (<code>aws ecs run-task …</code>), boto3 (<code>ecs.run_task(…)</code>), or other services such as EventBridge Scheduler (nightly) and Step Functions (fan-out).</p>
+<ul>
+<li><strong>RunTask:</strong> start it now, it runs until it exits, and nobody restarts it. Use it for the planner, retraining and scenarios.</li>
+<li><strong>CreateService:</strong> keep N running forever, replacing any that stop. Use it for the forecast API.</li>
+</ul>
+<p>It gets its own lesson after networking: scheduling, fan-out and concurrency.</p>
+</details>
+
+<div class="quiz" data-quiz="q-followups2"></div>
+<script type="application/json" id="q-followups2">
+{
+  "title": "Check your follow-ups",
+  "shuffle": true,
+  "questions": [
+    { "q": "Your planner's task definition says networkMode awsvpc. Where do you choose which private subnets it runs in?",
+      "options": ["In the RunTask call", "In the task definition", "In the Docker image", "In the cluster settings"], "answer": 0,
+      "why": "The task definition says HOW (awsvpc). The networkConfiguration on RunTask or the service says WHERE: subnets, security groups, public IP." },
+    { "q": "A planner task in a private subnet with no NAT gateway and no VPC endpoints can't start, because pulling the ECR image times out. Why?",
+      "options": ["No route reaches ECR", "Task role lacks permissions", "Fargate forbids private subnets", "awsvpc needs default VPC"], "answer": 0,
+      "why": "Private subnets are fine, but the task still needs a network path to ECR (and CloudWatch, S3). Add a NAT gateway or VPC endpoints. More in lesson 3." },
+    { "q": "The image has CMD [\"python\", \"-m\", \"planner.solve\"] and the task definition has no command. What runs?",
+      "options": ["The image's CMD runs", "Task fails validation entirely", "Nothing runs at all", "ECS picks a default"], "answer": 0,
+      "why": "command is optional. If you set it, it replaces CMD. If you don't, the image's CMD is used." },
+    { "q": "The task definition sets SOLVER_THREADS=8. One RunTask call overrides it to 4. What does that run's code see?",
+      "options": ["Four for that run", "Eight for that run", "Both values joined together", "Run fails with conflict"], "answer": 0,
+      "why": "A run-time override beats the task definition, which beats the Dockerfile ENV. Other runs still see 8." },
+    { "q": "Scenario Lab: you want to pass a 50,000-row demand table to each run as an env override. What should you do?",
+      "options": ["Pass S3 key instead", "Split into many variables", "Register 200 new revisions", "Bake data into image"], "answer": 0,
+      "why": "Overrides are limited to 8,192 characters in total. Store the scenario inputs in S3 and pass only a pointer." },
+    { "q": "Your nightly solve finishes and the process exits with code 0. Does stopTimeout come into play?",
+      "options": ["No, it exited itself", "Yes, ECS waits 120s", "Yes, ECS sends SIGKILL", "Only on Fargate Spot"], "answer": 0,
+      "why": "stopTimeout only matters when ECS stops a task (StopTask, deployment, scale-in, Spot interruption). A process that exits on its own isn't being stopped." },
+    { "q": "A deployment replaces your forecast API's tasks. In what order do things happen to an old task?",
+      "options": ["Deregister, SIGTERM, then SIGKILL", "SIGKILL, deregister, then SIGTERM", "SIGTERM, SIGKILL, then deregister", "Deregister, SIGKILL, then SIGTERM"], "answer": 0,
+      "why": "The task is removed from the load balancer first (no new requests), then gets SIGTERM, then SIGKILL only if it's still running after stopTimeout." },
+    { "q": "A 40-minute MILP on Fargate Spot gets an interruption notice. What's the right design?",
+      "options": ["Checkpoint incumbent, exit quickly", "Set stopTimeout to 40m", "Ignore SIGTERM and continue", "Disable essential on solver"], "answer": 0,
+      "why": "stopTimeout can't exceed 120s, so catch SIGTERM, save the best solution so far plus state to S3, and let the scenario be retried or resumed." },
+    { "q": "Two copies of your forecast API run on ONE EC2 server in host mode, both on port 8000. What happens?",
+      "options": ["Second copy can't bind", "Both share the traffic", "ECS assigns new IPs", "Fargate moves one away"], "answer": 0,
+      "why": "In host mode containers use the server's own network directly, so only one process can hold port 8000. awsvpc avoids this by giving each task its own IP." },
+    { "q": "You need the nightly planner to run once, finish and stop. Which ECS API starts it?",
+      "options": ["RunTask, one-off run", "CreateService, desired count", "RegisterTaskDefinition, new revision", "UpdateService, force deploy"], "answer": 0,
+      "why": "RunTask starts a standalone task that runs until it exits. A service would keep restarting it." }
+  ]
+}
+</script>
+
+<h2>Go deeper</h2>
+<div class="source">
+  <strong>Primary source:</strong> <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">Amazon ECS task definition parameters for Fargate</a>. It's long, so treat it as a dictionary. Read <em>Family</em>, <em>Task role</em>, <em>Task execution role</em>, <em>Task size</em> and the <code>essential</code> entry, then skim the rest so you know where things are.
+</div>
+
+<div class="ask">
+  Ask me anything that's unclear. For example: "what does the task role's trust policy look like?" or "how would the forecast API's task definition differ from this one?"
+</div>
+
+<footer class="next">
+  <p><strong>Next:</strong> <a href="0003-networking-for-fargate.html">Lesson 3</a>, where tasks live on the network. It covers <code>awsvpc</code>, subnets, security groups, and how a load balancer reaches your forecast API's tasks.</p>
+  <p>Keep the <a href="../reference/task-definition-fields.html">task definition fields cheat sheet</a> and the <a href="../reference/ecs-building-blocks.html">building blocks cheat sheet</a> handy.</p>
+  <p class="muted">Sources: [1] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html">Task definition parameters for Fargate</a> · [2] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html">Task definition differences for Fargate</a> · [3] <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-taskdef-ephemeralstorage.html">Fargate ephemeral storage</a> · [4] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html">Task execution IAM role</a> · [5] <a href="https://docs.aws.amazon.com/sdk-for-ruby/v3/api/Aws/ECS/Types/LogConfiguration.html">ECS API: LogConfiguration</a> · [6] <a href="https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/security-iam-roles.html">ECS best practices: IAM roles</a> · [7] <a href="https://docs.aws.amazon.com/help-panel/AmazonECS/latest/console/hp-service-edit-container-overrides.html">ECS console help: container overrides</a> · [8] <a href="https://docs.aws.amazon.com/sdk-for-kotlin/api/latest/ecs/aws.sdk.kotlin.services.ecs.model/-register-task-definition-request/-builder/network-mode.html">ECS API: networkMode</a> · [9] <a href="https://aws.amazon.com/ecs/faqs/">ECS FAQs</a> · [10] <a href="https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html">ECS API: RunTask</a> · [11] <a href="https://aws.amazon.com/blogs/compute/deep-dive-into-fargate-spot-to-run-your-ecs-tasks-for-up-to-70-less/">AWS blog: Fargate Spot deep dive</a> · [12] <a href="https://aws.amazon.com/blogs/containers/graceful-shutdowns-with-ecs/">AWS blog: Graceful shutdowns with ECS</a> · [13] <a href="https://aws.amazon.com/blogs/compute/migrating-your-amazon-ecs-containers-to-aws-fargate/">AWS blog: Migrating ECS containers to Fargate</a></p>
+</footer>
+</main>
+<script src="../assets/annotate.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</body>
+</html>

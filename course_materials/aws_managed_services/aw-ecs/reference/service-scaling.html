@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service Scaling</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="../lessons/0007-scaling-a-service.html">From lesson 7</a> · <a href="service-deployments.html">Service deployments</a> · <a href="running-many-jobs.html">Running many jobs</a> · <a href="fargate-networking.html">Networking</a> · <a href="task-definition-fields.html">Task definition fields</a></nav>
+<h1>Scaling an ECS service</h1>
+<p class="subtitle">Target tracking, queue workers, scale-in protection.</p>
+
+<h2>What it changes</h2>
+<p>Service Auto Scaling moves <code>desiredCount</code> between <strong>min</strong> and <strong>max</strong> (the scalable target, dimension <code>ecs:service:DesiredCount</code>). The service then starts or stops tasks. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html">docs</a></p>
+<pre><code>aws application-autoscaling register-scalable-target --service-namespace ecs \
+  --scalable-dimension ecs:service:DesiredCount \
+  --resource-id service/CLUSTER/SERVICE --min-capacity 2 --max-capacity 10</code></pre>
+
+<p>Attaches to a <strong>service</strong> only (not task definitions, clusters or standalone tasks), as a separate step after the service exists. Once on, it owns <code>desiredCount</code>.</p>
+
+<h2>Policy types</h2>
+<div class="table-wrap"><table>
+  <tr><th>Type</th><th>Use for</th></tr>
+  <tr><td>Target tracking</td><td>Default. "Keep metric near X." Manages its own alarms (don't edit them).</td></tr>
+  <tr><td>Step scaling</td><td>Full control over step sizes and reaction speed. You create the alarms.</td></tr>
+  <tr><td>Scheduled</td><td>Known peaks (e.g. raise min at 07:00 on Mondays).</td></tr>
+</table></div>
+
+<h2>Picking the metric</h2>
+<div class="table-wrap"><table>
+  <tr><th>App</th><th>Metric</th></tr>
+  <tr><td>CPU-bound API (inference, LP solves)</td><td><code>ECSServiceAverageCPUUtilization</code></td></tr>
+  <tr><td>I/O-bound API (waits on LLMs, databases)</td><td><code>ALBRequestCountPerTarget</code> (not supported with the blue/green deployment type)</td></tr>
+  <tr><td>Memory-bound</td><td><code>ECSServiceAverageMemoryUtilization</code></td></tr>
+  <tr><td>Queue worker</td><td><strong>Backlog per task</strong> (metric math), never raw queue depth or CPU</td></tr>
+</table></div>
+<p>Ask: which number actually rises when this app is busy? Leave headroom in the target (e.g. CPU 60%) to cover the startup time of new tasks.</p>
+
+<h2>Arithmetic</h2>
+<pre><code>new desiredCount  ≈ current tasks × (current metric ÷ target)
+backlog per task  = ApproximateNumberOfMessagesVisible ÷ RunningTaskCount
+target value      = acceptable wait ÷ seconds per message      (600 s ÷ 30 s = 20)</code></pre>
+<p><code>RunningTaskCount</code> needs <strong>Container Insights</strong> on the cluster. No data → no scaling. Keep min ≥ 1 for backlog-per-task. Max capacity must fit the Fargate vCPU quota. <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-queue.html">docs</a></p>
+
+<h2>Target tracking rules</h2>
+<ul>
+  <li>Out fast and in proportion; in gradually. Rounds cautiously.</li>
+  <li>Insufficient data → no scaling (never treated as low).</li>
+  <li>Several policies: out if <em>any</em> wants to, in only if <em>all</em> agree.</li>
+  <li>Scale-in is <strong>off during deployments</strong>; scale-out continues.</li>
+  <li>Cooldowns: short for out (e.g. 60 s), longer for in (e.g. 300 s).</li>
+</ul>
+<p><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-autoscaling-targettracking.html">docs</a></p>
+
+<h2>Queue workers: don't lose or double-count work</h2>
+<div class="table-wrap"><table>
+  <tr><th>Do</th><th>Why</th></tr>
+  <tr><td>Visibility timeout ≥ longest job (default 30 s)</td><td>Otherwise a second worker starts the same job</td></tr>
+  <tr><td>Idempotent result keys, e.g. <code>results/{job_id}.json</code></td><td>Messages can be processed twice</td></tr>
+  <tr><td>Task scale-in protection while working</td><td>Scale-in and deployments skip busy tasks</td></tr>
+  <tr><td>Handle SIGTERM: stop receiving, finish or abandon within <code>stopTimeout</code></td><td>An abandoned message reappears after its visibility timeout</td></tr>
+</table></div>
+
+<h2>Task scale-in protection</h2>
+<pre><code>PUT $ECS_AGENT_URI/task-protection/v1/state  {"ProtectionEnabled": true, "ExpiresInMinutes": 15}
+PUT $ECS_AGENT_URI/task-protection/v1/state  {"ProtectionEnabled": false}
+GET $ECS_AGENT_URI/task-protection/v1/state</code></pre>
+<ul>
+  <li><code>ExpiresInMinutes</code>: 1 to 2,880. Default <strong>120</strong>, then protection switches off.</li>
+  <li>Service tasks only (standalone tasks get <code>TASK_NOT_VALID</code>).</li>
+  <li>Blocks scale-in and deployments only, not Spot interruptions or crashes.</li>
+  <li>From outside the task: the <code>UpdateTaskProtection</code> API.</li>
+</ul>
+<p><a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-scale-in-protection-endpoint.html">docs</a></p>
+</main>
+</body>
+</html>

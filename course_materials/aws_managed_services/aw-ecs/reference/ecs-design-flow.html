@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ECS Design Flow</title>
+<link rel="stylesheet" href="../assets/course.css">
+<style>
+  .step { border: 1px solid var(--rule); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0;
+          padding: .9rem 1.1rem; margin: 1.4rem 0; background: var(--card); break-inside: avoid-page; }
+  .step h2 { border: 0; padding: 0; margin: 0 0 .5rem; font-size: 1.35rem; }
+  .step .done { border-top: 1px dashed var(--rule); margin-top: .7rem; padding-top: .5rem; font-size: .95rem; }
+  .step .done b { color: var(--ok); }
+  .step .deep { font-size: .9rem; color: var(--muted); margin-top: .3rem; }
+  .step ul { margin: .3rem 0; }
+  .step li { margin: .2rem 0; }
+  .new { font-size: .75rem; font-family: var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 .3rem; margin-left: .4rem; vertical-align: middle; }
+</style>
+</head>
+<body class="reference">
+<main>
+<nav class="crumbs"><a href="index.html">All cheat sheets</a> · <a href="design-review-checklist.html">Design review checklist</a> · <a href="../lessons/0011-capstone-agent-assistant.html">Capstone (lesson 11)</a> · <a href="../GLOSSARY.md">Glossary</a></nav>
+<h1>ECS design flow</h1>
+<p class="subtitle">Designing an app on ECS (Fargate), step by step. Each step ends with what you should have decided; the details live in the linked sheets.</p>
+
+<pre><code>0 inputs → 1 shape → 2 task definitions → 3 network + service/task settings → 4 deployments
+         → 5 scaling → 6 observability → 7 compute + cost → 8 security + failure review → 9 write it as code</code></pre>
+<p class="muted">Steps marked <span class="new">added</span> weren't in your original list. Work in order, but expect to loop back: step 7's cost often changes a step 3 choice, such as how many NAT gateways.</p>
+
+<div class="step">
+<h2>0 · Gather the inputs <span class="new">added</span></h2>
+<p>Every later decision depends on these. Write them down first:</p>
+<ul>
+  <li><strong>Who waits for what?</strong> A user waiting for a reply (seconds), or nobody (background work)?</li>
+  <li><strong>How long does each unit of work take?</strong> Milliseconds, minutes, hours?</li>
+  <li><strong>Traffic shape:</strong> steady, business hours, known peaks, bursts.</li>
+  <li><strong>Trust:</strong> does anything run code you didn't write (LLM output, user uploads)?</li>
+  <li><strong>Data:</strong> how sensitive is it, and where does it live (S3, RDS, ElastiCache)?</li>
+  <li><strong>Special hardware:</strong> GPU, &gt;32 vCPU or &gt;244 GB, privileged containers?</li>
+  <li><strong>Team and budget:</strong> who runs it at 3 a.m., and what can it cost per month?</li>
+</ul>
+<div class="done"><b>Done when:</b> you can answer all seven in a sentence each.</div>
+</div>
+
+<div class="step">
+<h2>1 · Shape: services, tasks, and how many task definitions</h2>
+<div class="table-wrap"><table>
+  <tr><th>If the piece…</th><th>It's a…</th></tr>
+  <tr><td>is always on and answers requests</td><td><strong>Service</strong> (behind an ALB if users call it; reached by Service Connect if only other services call it)</td></tr>
+  <tr><td>works through a queue of jobs</td><td><strong>Worker service</strong> fed by SQS: a normal service with no ports or load balancer (not a separate ECS type)</td></tr>
+  <tr><td>runs, finishes and exits</td><td><strong>Standalone task</strong> (RunTask) or a <strong>scheduled task</strong> (EventBridge Scheduler)</td></tr>
+  <tr><td>runs many independent jobs at once</td><td>Many standalone tasks, or a worker service</td></tr>
+  <tr><td>runs untrusted code</td><td>Its <strong>own task definition</strong>, one task per run, never a sidecar</td></tr>
+  <tr><td>is a helper bound 1:1 to one app (log router, telemetry, proxy)</td><td><strong>Sidecar</strong> container in that app's task definition</td></tr>
+</table></div>
+<ul>
+  <li><strong>One business purpose = one task definition.</strong> Split further when trust, lifetime or scaling differ.</li>
+  <li><strong>Calls to Bedrock, a database or another API are code</strong>, not separate pieces.</li>
+  <li><strong>Decide how pieces talk:</strong> synchronous HTTP (someone is waiting) or a queue (nobody is). Long work → the async pattern: start, return an ID, poll.</li>
+  <li><strong>State lives outside tasks</strong> (S3, RDS, ElastiCache), because tasks are replaced at any time.</li>
+</ul>
+<div class="done"><b>Done when:</b> you have a list like "frontend = service, api = service, sandbox = standalone task per run", plus an arrow for every call between pieces, labelled HTTP, queue or RunTask.</div>
+<p class="deep">Deep dive: <a href="ecs-building-blocks.html">Building blocks</a> · <a href="running-jobs.html">Running jobs</a> · <a href="running-many-jobs.html">Running many jobs</a> · lessons <a href="../lessons/0001-ecs-building-blocks.html">1</a>, <a href="../lessons/0004-running-jobs.html">4</a>, <a href="../lessons/0005-running-many-jobs.html">5</a>, <a href="../lessons/0011-capstone-agent-assistant.html">11 (Part 1)</a></p>
+</div>
+
+<div class="step">
+<h2>2 · Task definitions, field by field</h2>
+<p>Go through this list once per task definition:</p>
+<div class="table-wrap"><table>
+  <tr><th>Field</th><th>Decide</th><th>Typical default</th></tr>
+  <tr><td><strong>Containers</strong></td><td>The app, plus any sidecars (log router, OTel collector). Service Connect adds its own proxy automatically.</td><td>One app container</td></tr>
+  <tr><td><code>essential</code> / <code>dependsOn</code></td><td>Which containers stop the task if they exit; start order</td><td>App essential; sidecars non-essential, with a <code>restartPolicy</code></td></tr>
+  <tr><td><strong>Image</strong></td><td>ECR repository; immutable tag (date + commit) or digest; built for the right CPU architecture</td><td>One repository per image, <code>IMMUTABLE</code></td></tr>
+  <tr><td><code>cpu</code> / <code>memory</code></td><td>A valid Fargate pair, sized from measured use plus headroom</td><td>Start small, then size from Container Insights</td></tr>
+  <tr><td><code>runtimePlatform</code></td><td><code>X86_64</code> or <code>ARM64</code> (about 20% cheaper; every native library needs an ARM build)</td><td>ARM64 if the libraries allow</td></tr>
+  <tr><td><code>ephemeralStorage</code></td><td>Scratch disk space (20 GB default, up to 200)</td><td>Default</td></tr>
+  <tr><td><code>portMappings</code></td><td>Container port; a port <code>name</code> if called through Service Connect</td><td>One port; bind the app to <code>0.0.0.0</code></td></tr>
+  <tr><td><code>environment</code></td><td>Non-secret config: hostnames, model IDs, log level, IDs of other resources</td><td>Plain values only</td></tr>
+  <tr><td><code>secrets</code></td><td>Secrets Manager / Parameter Store ARNs (JSON key with <code>:key::</code>)</td><td>Never in <code>environment</code>, never in the image</td></tr>
+  <tr><td><strong>Execution role</strong> (ECS uses it)</td><td>ECR pull (<code>GetAuthorizationToken</code>, <code>BatchGetImage</code>, <code>GetDownloadUrlForLayer</code>, <code>BatchCheckLayerAvailability</code>) · logs (<code>CreateLogStream</code>, <code>PutLogEvents</code>) · <code>secretsmanager:GetSecretValue</code> / <code>ssm:GetParameters</code> / <code>kms:Decrypt</code> only if it has secrets</td><td>The managed <code>AmazonECSTaskExecutionRolePolicy</code> + a scoped secrets policy</td></tr>
+  <tr><td><strong>Task role</strong> (your code uses it)</td><td>Only what the code calls: S3 on specific prefixes, <code>bedrock:InvokeModel</code> on one model, SQS receive/delete on one queue, <code>ecs:RunTask</code> + <code>iam:PassRole</code> to start other tasks, <code>ssmmessages</code> if ECS Exec</td><td>None at all if the code calls no AWS APIs</td></tr>
+  <tr><td><code>logConfiguration</code></td><td>awslogs group, stream prefix, mode (non-blocking is the default)</td><td>One log group per app, with a retention period</td></tr>
+  <tr><td><code>healthCheck</code></td><td>Container check command, <code>startPeriod</code> (essential for anything with no ALB in front of it)</td><td>Shallow <code>/health</code> or a heartbeat file</td></tr>
+  <tr><td><code>stopTimeout</code></td><td>Time between SIGTERM and SIGKILL to finish in-flight work</td><td>30 s; up to 120 s on Fargate</td></tr>
+  <tr><td><strong>Hardening</strong> <span class="new">added</span></td><td><code>readonlyRootFilesystem</code>, non-root <code>user</code>, no extra Linux capabilities (especially for untrusted code). Note: a read-only root breaks ECS Exec.</td><td>Read-only + non-root for sandboxes</td></tr>
+</table></div>
+<p class="muted">On-Demand vs Spot is <em>not</em> in the task definition: decide it here, set it on the service or RunTask call (step 3). Desired, min and max counts are step 5.</p>
+<div class="done"><b>Done when:</b> for every task definition you can fill in every row above, and each role's permissions fit on an index card.</div>
+<p class="deep">Deep dive: <a href="task-definition-fields.html">Task definition fields</a> · <a href="images-and-secrets.html">Images and secrets</a> · lessons <a href="../lessons/0002-reading-a-task-definition.html">2</a>, <a href="../lessons/0008-images-and-secrets.html">8</a>, <a href="../lessons/0011-capstone-agent-assistant.html">11 (Part 3)</a> · "Role, security group or both?" on the <a href="design-review-checklist.html">review checklist</a></p>
+</div>
+
+<div class="step">
+<h2>3 · Network, and the service / task settings</h2>
+<p><strong>Subnets</strong> (at least 2 AZs, each tier in each AZ):</p>
+<div class="table-wrap"><table>
+  <tr><th>Tier</th><th>Holds</th><th>Route out</th></tr>
+  <tr><td>Public</td><td>Internet-facing ALB, NAT gateway. Nothing else.</td><td>Internet gateway</td></tr>
+  <tr><td>Private with egress</td><td>Services that call non-AWS internet APIs</td><td>NAT gateway</td></tr>
+  <tr><td>Private, isolated</td><td>Untrusted-code tasks, databases, anything that must never reach the internet</td><td>None (VPC endpoints only)</td></tr>
+</table></div>
+<p><strong>Do I need NAT?</strong> Only if something calls a <em>non-AWS</em> internet address (third-party APIs, public package mirrors at runtime). AWS services can be reached through endpoints instead.</p>
+<p><strong>VPC endpoints:</strong> always the free S3 gateway endpoint. For any task with no NAT route: <code>ecr.api</code>, <code>ecr.dkr</code>, <code>logs</code> (it can't start without them), plus <code>secretsmanager</code> / <code>ssm</code> if it has secrets. Then per service called: <code>bedrock-runtime</code>, <code>sqs</code>, <code>ecs</code> (for RunTask), <code>ssmmessages</code> (ECS Exec). Each interface endpoint costs per hour per AZ.</p>
+<p><strong>Security groups:</strong> one per piece. Inbound rules name the <em>caller's group</em>, not IP ranges. Outbound: open only where needed; locked down (allow-all off) for untrusted code. Write the chain: internet → ALB → app → API → DB.</p>
+<p><strong>How pieces connect:</strong> internet → public ALB (HTTPS listener, ACM certificate, target group type <code>ip</code>, health check path, idle timeout, stickiness if sessions live in memory). Service → service: Service Connect. Service → its own tasks: RunTask. Anything slower than the ALB idle timeout (60 s): use the async pattern.</p>
+<div class="table-wrap"><table>
+  <tr><th>Service settings</th><th>RunTask / scheduled task settings</th></tr>
+  <tr><td>cluster · capacity provider strategy (Fargate / Spot, base + weight) · <code>networkConfiguration</code> (private subnets, security group, <code>assignPublicIp: DISABLED</code>) · <code>loadBalancers</code> (target group, container, port) · <code>serviceConnectConfiguration</code> · <code>healthCheckGracePeriodSeconds</code> · <code>enableExecuteCommand</code></td><td>task definition <strong>revision</strong> · capacity provider strategy · <code>networkConfiguration</code> · <code>overrides</code> (environment / command, ≤ 8 KB: pass IDs, not data) · <code>clientToken</code> (safe retries) · <code>startedBy</code> · a scheduler role with <code>iam:PassRole</code></td></tr>
+</table></div>
+<div class="done"><b>Done when:</b> you can draw every arrow with its subnet, security group rule, port and route (local, NAT or endpoint), and fill in both columns above for every service and task.</div>
+<p class="deep">Deep dive: <a href="fargate-networking.html">Networking</a> · <a href="running-jobs.html">Running jobs</a> · lessons <a href="../lessons/0003-networking-for-fargate.html">3</a>, <a href="../lessons/0011-capstone-agent-assistant.html">11 (Part 2)</a></p>
+</div>
+
+<div class="step">
+<h2>4 · Deployments</h2>
+<ul>
+  <li><strong>Strategy:</strong> rolling (default, min 100% / max 200%), or blue/green, linear, canary when you need traffic shifting and a bake time.</li>
+  <li><strong>Three timers:</strong> grace period / <code>startPeriod</code> (startup) · deregistration delay just above your longest request (draining) · <code>stopTimeout</code> with SIGTERM handling (shutdown).</li>
+  <li><strong>Two safety nets:</strong> circuit breaker with rollback (tasks that won't start or stay healthy) + CloudWatch alarm rollback (healthy but wrong: 5xx, error rate).</li>
+  <li><strong>Release order:</strong> things that are called before their callers; new task definition revision before the service that names it; keep changes backward compatible.</li>
+  <li><strong>Pinning:</strong> services pin the image digest per deployment; standalone tasks resolve the tag every run, so name exact revisions and immutable tags.</li>
+  <li><strong>Secrets rotation:</strong> force a new deployment, or read the secret at runtime.</li>
+  <li><strong>Sessions in memory</strong> (e.g. Streamlit) are cut when a task is replaced: keep state outside the task, release off-hours.</li>
+</ul>
+<div class="done"><b>Done when:</b> you can say what happens, second by second, when a bad release goes out, and why users don't notice.</div>
+<p class="deep">Deep dive: <a href="service-deployments.html">Service deployments</a> · lessons <a href="../lessons/0006-deploying-a-service.html">6</a>, <a href="../lessons/0011-capstone-agent-assistant.html">11 (Part 4)</a></p>
+</div>
+
+<div class="step">
+<h2>5 · Scaling</h2>
+<div class="table-wrap"><table>
+  <tr><th>Shape</th><th>Scale on</th></tr>
+  <tr><td>CPU-bound API</td><td>Target tracking on average CPU (e.g. 60%)</td></tr>
+  <tr><td>I/O-bound API behind an ALB</td><td><code>ALBRequestCountPerTarget</code></td></tr>
+  <tr><td>Service reached only by Service Connect</td><td>Service Connect request metrics or a custom metric</td></tr>
+  <tr><td>Queue worker</td><td>Backlog per task (needs Container Insights); target = acceptable wait ÷ time per job</td></tr>
+  <tr><td>Standalone tasks</td><td>No auto scaling: cap concurrency in the caller's code</td></tr>
+</table></div>
+<ul>
+  <li><strong>Min</strong> for availability (2 across AZs), <strong>max</strong> for cost; scheduled scaling for known peaks; out fast, in slowly.</li>
+  <li><strong>Quotas:</strong> sum of (max tasks × vCPU) across everything must fit the Fargate vCPU quota; RunTask has a rate limit.</li>
+  <li><strong>Workers:</strong> visibility timeout above the longest job, idempotent results, scale-in protection while busy.</li>
+  <li>Scale-in pauses during deployments.</li>
+</ul>
+<div class="done"><b>Done when:</b> each service has a metric, target, min and max, and you've checked the worst case against the quota.</div>
+<p class="deep">Deep dive: <a href="service-scaling.html">Service scaling</a> · <a href="running-many-jobs.html">Running many jobs</a> · lessons <a href="../lessons/0007-scaling-a-service.html">7</a>, <a href="../lessons/0005-running-many-jobs.html">5</a></p>
+</div>
+
+<div class="step">
+<h2>6 · Observability and debugging</h2>
+<ul>
+  <li><strong>Logs:</strong> awslogs per container, a retention period, a request / job / run ID in every line, step timings, never secrets.</li>
+  <li><strong>Metrics:</strong> Container Insights (enhanced) on the cluster.</li>
+  <li><strong>History:</strong> event capture, so stopped tasks are visible for longer than an hour.</li>
+  <li><strong>Alarms:</strong> 5xx rate, latency, queue age, failed runs, used for rollback and paging.</li>
+  <li><strong>Access:</strong> ECS Exec only where justified (task role <code>ssmmessages</code>, endpoint if no NAT); off for untrusted code.</li>
+  <li><strong>Playbook:</strong> did my code run? No → stoppedReason; yes → exit code + logs; alive but wrong → metrics + Exec. Timeout = network gate; AccessDenied = IAM gate.</li>
+</ul>
+<div class="done"><b>Done when:</b> for "it won't start", "it's slow" and "it's wrong", you know the first place to look.</div>
+<p class="deep">Deep dive: <a href="debugging-playbook.html">Debugging playbook</a> · lesson <a href="../lessons/0009-debugging-and-observability.html">9</a></p>
+</div>
+
+<div class="step">
+<h2>7 · Compute and cost</h2>
+<ul>
+  <li><strong>Compute:</strong> Fargate by default (per-task isolation) · Managed Instances for GPUs, &gt;32 vCPU / 244 GB, privileged · EC2 launch type only for full host control · Spot only for interruptible, retry-safe work · Express Mode as a shortcut for a public web service.</li>
+  <li><strong>Fargate maths:</strong> tasks × hours × (vCPU × vCPU price + GB × GB price); always-on = 720 h; ARM ≈ 20% less.</li>
+  <li><strong>Fixed costs:</strong> ALB, NAT (per hour + per GB), interface endpoints (per hour per AZ), public IPv4, logs, Container Insights. For small apps these can match the compute.</li>
+  <li><strong>Levers:</strong> ARM64, Spot, scheduled scale-down out of hours, fewer endpoints vs NAT data charges, Savings Plans once steady.</li>
+</ul>
+<div class="done"><b>Done when:</b> you have a monthly estimate, compute and fixed network separately, and know your biggest line (often not ECS: model tokens, the database).</div>
+<p class="deep">Deep dive: <a href="compute-and-cost.html">Compute and cost</a> · lesson <a href="../lessons/0010-choosing-compute-and-cost.html">10</a></p>
+</div>
+
+<div class="step">
+<h2>8 · Security and failure review <span class="new">added</span></h2>
+<p><strong>Security pass:</strong> no public IPs on tasks · every role least-privilege (and PassRole scoped, never <code>*</code>) · secrets never in environment or images · untrusted code isolated (own task, isolated subnets, no outbound, tiny role) · images scanned · DB users read-only where possible.</p>
+<p><strong>Failure pass:</strong> for each, say what happens and how you'd notice:</p>
+<ul>
+  <li>a task crashes · an AZ fails (and with it, a single NAT) · a Spot task is reclaimed</li>
+  <li>a dependency is slow or down (Bedrock, the DB, a third-party API) · a bad release ships</li>
+  <li>a secret rotates · a cleanup rule deletes an image · the vCPU quota is reached</li>
+</ul>
+<div class="done"><b>Done when:</b> every failure has a behaviour you chose and an alarm or log line that tells you it happened.</div>
+<p class="deep">Deep dive: <a href="design-review-checklist.html">Design review checklist</a> · lesson <a href="../lessons/0011-capstone-agent-assistant.html">11</a></p>
+</div>
+
+<div class="step">
+<h2>9 · Write it as code, and review it <span class="new">added</span></h2>
+<ul>
+  <li>Turn steps 1 to 7 into CDK: VPC + endpoints, repositories, task definitions, roles via <code>grant…</code>, security groups, cluster, services.</li>
+  <li><code>cdk synth</code> to check it builds; <code>cdk diff</code> before every <code>cdk deploy</code>, read like a code review.</li>
+  <li>Run the 8-question <a href="design-review-checklist.html">design review checklist</a> against the code, not just the drawing.</li>
+</ul>
+<div class="done"><b>Done when:</b> the whole design deploys and is removed with one command each.</div>
+<p class="deep">Deep dive: <a href="cdk-for-ecs.html">CDK for ECS</a> · lesson <a href="../lessons/0012-infrastructure-as-code-first-look.html">12</a></p>
+</div>
+</main>
+</body>
+</html>
