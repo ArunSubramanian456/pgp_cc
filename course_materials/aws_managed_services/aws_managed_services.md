@@ -853,3 +853,121 @@ The video demonstrates an end-to-end AWS delivery workflow for a Java web applic
 The main takeaway is that a **Git push can trigger an automated, repeatable pipeline** from source code through build and deployment to production.
 
 ---
+
+# Workflow steps
+
+---
+
+## Setup EC2 Dev Server
+
+1. **Launch an EC2 development server** named `dev-server`, using a stable Ubuntu LTS image, a lightweight instance, and consistent VPC settings.
+2. **Configure access** by allowing SSH (port 22) and Tomcat testing (port 8080) in its security group.
+3. **Prepare the instance**: connect with SSH and a PEM key, update packages, and install the AWS CLI.
+4. **Attach an IAM role** so the instance can access CodeCommit, CodeDeploy, CodePipeline, CloudWatch, and S3 without storing credentials on the server. In practice, grant only the permissions the workflow needs.
+5. **Set up the workspace** by using `/opt` for the codebase and assigning ownership to the `ubuntu` user.
+
+This prepares the EC2 instance to serve as a development environment for an AWS CI/CD workflow.
+
+##  CodeCommit Repo, Opsroot User
+
+1. Create a CodeCommit repository named `helloworld`.
+2. Review optional services such as CodeGuru Reviewer and their costs before enabling them.
+3. Avoid using the root account for repository access; create a dedicated IAM user instead.
+4. Grant that user only the permissions needed—use least privilege rather than broad admin access.
+5. Sign in as the IAM user and verify the repository’s access options are available.
+
+## Setup SSH, GitClone
+
+### Connect to CodeCommit over SSH
+
+1. **Check that Git is installed**
+```bash
+git --version
+```
+If it isn’t installed, install Git using your operating system’s package manager.
+
+2. **Generate an SSH key pair**
+```bash
+mkdir -p ~/.ssh
+ssh-keygen -t rsa -b 2048 -f ~/.ssh/Codecommit_RSA
+```
+Set a passphrase when prompted. The public key is `~/.ssh/Codecommit_RSA.pub`; the private key is `~/.ssh/Codecommit_RSA`. Keep the private key secret.
+
+3. **Register the public key with IAM**
+```bash
+cat ~/.ssh/Codecommit_RSA.pub
+```
+Copy the output and add it to the IAM user’s **Security credentials → SSH keys for AWS CodeCommit**. Note the SSH key ID AWS assigns; you’ll use it as the SSH username.
+
+4. **Configure SSH**
+   
+Create or edit `~/.ssh/config` and add this entry, replacing the key ID with your own:
+```sshconfig
+Host git-codecommit.*.amazonaws.com
+  User YOUR_SSH_KEY_ID
+  IdentityFile ~/.ssh/Codecommit_RSA
+```
+Restrict access to the private key and config file:
+```bash
+chmod 600 ~/.ssh/Codecommit_RSA ~/.ssh/config
+```
+
+5. **Test the connection and clone the repository**
+   
+Replace the region with the one where your repository is hosted:
+```bash
+ssh git-codecommit.us-west-2.amazonaws.com
+```
+Accept the host prompt and enter your key passphrase. After successful authentication, clone the repository using its SSH URL from the CodeCommit console:
+```bash
+git clone <repository-SSH-URL>
+```
+An empty repository may produce a warning; that simply means it has no commits yet.
+
+
+## Code Setup, GitPush
+
+### 1. Prepare a temporary directory on the EC2 instance
+```bash
+sudo mkdir -p /opt/temp
+sudo chown ubuntu:ubuntu /opt/temp
+```
+This provides an isolated staging area and lets the `ubuntu` user write to it.
+
+### 2. Transfer the archive
+
+**From your laptop**, replace the key file and EC2 public IP:
+```bash
+scp -i your.pem HelloWorld-CodeBase.tar.gz ubuntu@PUBLIC-IP:/opt/temp/
+```
+
+Alternatively, **on EC2**, download from a URL:
+```bash
+cd /opt/temp
+wget 'FULL-ARCHIVE-URL'
+```
+
+### 3. Extract and copy the code on EC2
+```bash
+cd /opt/temp
+tar -xzf HelloWorld-CodeBase.tar.gz
+rm -rf /opt/temp/HelloWorld/.git
+rsync -a /opt/temp/HelloWorld/ /opt/helloworld/
+```
+Check the extracted directory’s capitalization: Linux paths are case-sensitive. Remove the archive’s `.git` directory so its old repository history does not replace the target repository’s history. The trailing slash on `HelloWorld/` copies its contents into `/opt/helloworld/`.
+
+### 4. Stage and commit the files
+```bash
+cd /opt/helloworld
+git status
+git add .
+git status
+git commit -m "First commit"
+```
+Review `git status` before committing to confirm the intended files are staged.
+
+### 5. Push to the remote repository
+```bash
+git push origin master
+```
+This publishes the commit to the remote `master` branch. Use your team’s designated branch instead if it differs; the repository must already be configured as `origin`.
