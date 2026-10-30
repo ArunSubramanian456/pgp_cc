@@ -971,3 +971,28 @@ Review `git status` before committing to confirm the intended files are staged.
 git push origin master
 ```
 This publishes the commit to the remote `master` branch. Use your team’s designated branch instead if it differs; the repository must already be configured as `origin`.
+
+
+
+## CodeBuild Project Setup
+
+CodeBuild creates a temporary Docker-based environment to fetch source, run commands defined in `buildspec.yml`, and produce artifacts such as JARs or WARs for later deployment. It supports multiple source providers and managed build images, while CloudWatch logs and events can provide visibility and trigger SNS notifications.
+
+1. **Create an S3 artifact bucket** in the desired region. Optionally add a lifecycle rule to remove old build artifacts and control storage costs.
+2. **Create a CodeBuild project** and select the source provider (for example, CodeCommit), repository, and branch. Use a production or staging branch if you don’t want every development branch to trigger builds.
+3. **Choose the build environment** to match your project’s requirements—for example, an Ubuntu managed image with JDK 8. Pin an image version for predictable builds; use clone depth `1` to fetch only the latest commit.
+4. **Set the service role and project options.** The IAM role must let CodeBuild access its source and upload artifacts to S3. Configure compute size, timeout, and any environment variables as needed.
+5. **Configure build instructions and outputs.** Keep `buildspec.yml` in the repository root, unless the project specifies another location. Set the artifact destination to S3; choose “no artifacts” if the build publishes directly elsewhere, such as ECR.
+6. **Enable CloudWatch Logs** to review build output. Optionally configure build notifications through CloudWatch Events/EventBridge and SNS, or use a build badge for public projects.
+7. **Create and run the project**, then check the build logs and S3 bucket to verify that it completed and produced the expected artifact.
+
+## Running the build manually
+
+1. **Check the artifact bucket** so you can confirm afterward that the build created a new object.
+2. In CodeBuild, open the project and choose **Start build**. Review the build settings, including the timeout and any optional environment variables, then confirm.
+3. **Monitor the build** in the console: submission and queueing, environment setup, source/dependency downloads, pre-build commands, and build commands. Review logs there, or configure SNS notifications for updates.
+4. After completion, check the build status and details, then verify the expected artifact (such as `HelloWorld.tar.gz`) is in S3.
+5. Remember: starting a build this way is manual; commits won’t trigger builds automatically unless you configure a trigger or pipeline.
+
+
+
