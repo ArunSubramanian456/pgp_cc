@@ -30,3 +30,7 @@ course_materials/aws_managed_services/aw-ecs/learning-records/0008-lesson8-image
 course_materials/aws_managed_services/aw-ecs/learning-records/0009-lesson9-debugging.md
 course_materials/aws_managed_services/aw-ecs/learning-records/0010-lesson10-compute-and-cost.md
 course_materials/aws_managed_services/aw-ecs/learning-records/0011-capstone-design.md
+course_materials/aws_managed_services/codedeploy_installation.txt
+.gitignore
+course_materials/aws_managed_services/MSAD-5.docx
+course_materials/aws_managed_services/Disaster Recovery - RTO and RPO.docx

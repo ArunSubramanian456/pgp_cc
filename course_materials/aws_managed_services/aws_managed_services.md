@@ -995,4 +995,184 @@ CodeBuild creates a temporary Docker-based environment to fetch source, run comm
 5. Remember: starting a build this way is manual; commits won’t trigger builds automatically unless you configure a trigger or pipeline.
 
 
+## CodeDeploy Principles
 
+- **Deployment flow:** CodeBuild packages the application—such as a WAR file—along with an `appspec.yml` file. The artifact is stored in S3, then CodeDeploy directs the agent to download and deploy it.
+- **Deployment strategies:**
+  - **In-place:** Updates existing instances; taking them offline during deployment may cause an outage.
+  - **Blue/green:** Deploys to a separate environment before switching traffic, preserving the original as a safer fallback.
+- **AppSpec and lifecycle hooks:** `appspec.yml` maps artifact files to destination paths—for example, Tomcat’s `webapps` directory—and can run scripts at deployment stages such as `BeforeInstall` or `AfterInstall`.
+- **Setup tasks:** Configure CodeDeploy, install its agent on the target EC2 instance, and prepare a separate production instance.
+
+## EC2(prod), CodeDeploy Service Role
+
+1. Launch an Ubuntu EC2 instance named **`prod-server`**, using tags so CodeDeploy can identify its deployment targets.
+2. Configure access: allow SSH on port 22 and Tomcat traffic on port 8080; connect using SSH and run `sudo apt update`.
+3. Install **Tomcat 8** and verify it by opening the instance’s public IP on port 8080. Tomcat serves deployed applications from `/var/lib/tomcat8/webapps`; placing a WAR file there makes the app available.
+4. Install and configure the AWS CLI, then attach an EC2 IAM role for AWS access.
+5. Create a separate **CodeDeploy service role**.
+
+## CodeDeploy Agent Installation
+
+Run these commands **on the EC2 production server**, connected as `ubuntu`. Verify the OS is supported for the CodeDeploy agent in the current AWS documentation before installing; supported versions change.
+
+### 1. Check prerequisites and access
+
+The instance needs an IAM instance profile with permission to access the deployment artifact in S3. The CodeDeploy service role is separate. Ensure the server can make **outbound HTTPS connections on port 443**; the agent does not require an inbound port.
+
+```bash
+cat /etc/os-release
+aws sts get-caller-identity
+```
+
+The second command should identify the EC2 role’s AWS identity. If the AWS CLI is not installed, check the instance profile in the EC2 console instead.
+
+### 2. Install prerequisites
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ruby-full wget
+```
+
+### 3. Download and install the agent for the instance’s AWS Region
+
+Set `REGION` to the region where CodeDeploy operates, such as `us-west-2`:
+
+```bash
+REGION=us-west-2
+cd /tmp
+wget "https://aws-codedeploy-${REGION}.s3.${REGION}.amazonaws.com/latest/install" -O codedeploy-install
+chmod +x codedeploy-install
+sudo ./codedeploy-install auto
+```
+
+Use the matching regional URL—don’t use `us-west-2` if your resources are in another region.
+
+### 4. Start and verify the agent
+
+```bash
+sudo systemctl enable --now codedeploy-agent
+sudo systemctl status codedeploy-agent --no-pager
+```
+
+To inspect logs or restart the agent if needed:
+
+```bash
+sudo tail -n 50 /var/log/aws/codedeploy-agent/codedeploy-agent.log
+sudo systemctl restart codedeploy-agent
+```
+
+Once it reports **active (running)**, configure the CodeDeploy deployment group to target this instance. For an Auto Scaling group, install and verify the agent on a template instance, then bake it into the AMI so new instances are deployment-ready.
+
+
+
+## CodeDeploy Service Setup
+
+The video walks through deploying an application revision from an S3 artifact to a production EC2 instance using AWS CodeDeploy.
+
+1. **Verify the target is ready**
+   - Confirm the production EC2 instance is running and the **CodeDeploy agent** is installed and active.
+   - The agent receives deployment instructions and performs the work on the instance.
+
+2. **Create a CodeDeploy application**
+   - In the AWS console, create an application and select the **EC2/on-premises** compute platform.
+   - The application is the CodeDeploy container for related deployments.
+
+3. **Create a deployment group**
+   - Choose the service role that lets CodeDeploy interact with the target resources.
+   - Select how to find targets:
+     - An **Auto Scaling group** for dynamically changing fleets, or
+     - EC2 instances selected by tags, such as `Name=prod-server`.
+   - A deployment group represents the set of instances to receive a release. Separate groups can be used for components such as front end and back end.
+
+4. **Choose the deployment strategy**
+   - **In-place:** Update the existing instances. This is straightforward but can interrupt service if instances are unavailable during the update.
+   - **Blue/green:** Deploy to replacement instances, then switch over; the original environment remains available as a fallback.
+   - Set the rollout pace—for example, all at once, one at a time, or a custom percentage. A load balancer can remove instances from traffic during updates and return them afterward.
+
+5. **Deploy the application revision**
+   - Start a deployment and provide the S3 location of the packaged revision, such as a `.tar.gz` artifact.
+   - Review deployment and rollback options, then start the deployment.
+
+6. **Validate and troubleshoot**
+   - Check the deployment status and lifecycle events, then refresh the production URL to confirm the new application version is running.
+   - If deployment fails, check that the agent is active, the instance tags match, IAM permissions allow access to the S3 artifact, and the artifact exists.
+   - Use lifecycle events and the CodeDeploy agent logs to locate the failing step.
+
+The video presents this as a step toward a fully automated pipeline: the remaining goal is to connect source commits and builds so releases deploy without manually starting each deployment.
+
+
+## CodePipeline Setup
+
+The video shows how to align build artifacts with an automated AWS CodePipeline, then configure the pipeline to move code from source through build and deployment.
+
+1. **Fix the artifact format:** Manual deployments used a tarball, but the pipeline won’t automatically extract it when packaging is disabled. The buildspec is updated to specify the files the pipeline should pass to deployment.
+2. **Commit the change:** Edit `buildspec.yml`, commit the update, and push it to the repository’s `master` branch.
+3. **Create a CodePipeline:** Name the pipeline, create or select its service role, and keep the default artifact store and encryption settings.
+4. **Configure the stages:**
+   - **Source:** Select CodeCommit and the `master` branch. Choose push-based triggering or periodic polling.
+   - **Build:** Select CodeBuild (or Jenkins if using existing build infrastructure).
+   - **Deploy:** Select CodeDeploy; CloudFormation may be appropriate when the release also needs infrastructure changes.
+5. **Run and monitor:** Review the pipeline’s execution view and history, use its stop controls if needed, and allow for build setup and dependency-download time.
+6. **Test the full flow:** Push a real application change and verify that it travels through source, build, and deployment to produce the expected update.
+
+
+## Pipeline execution, Human approval
+
+1. **Set up approval notifications**
+   - Create an SNS topic to notify reviewers when a change is awaiting approval.
+   - Subscribe the reviewer’s email address to the topic.
+   - The reviewer must click the confirmation link before SNS can send them notifications.
+
+2. **Add an approval gate to the pipeline**
+   - Edit the pipeline and insert a **Manual approval** action between **Build** and **Deploy**.
+   - Configure it to publish notifications to the SNS topic.
+   - Add optional review context, such as a Jira ticket, change description, or dashboard URL, and make the approval question clear.
+
+3. **Trigger a pipeline execution**
+   - Commit and push a change to the configured source branch—for example, changing the application’s displayed version from `v1` to `v2`.
+   - The pipeline detects the push and starts automatically.
+
+4. **Monitor source and build stages**
+   - Confirm the source stage detects the new revision and the build stage runs.
+   - Review CodeBuild output in the pipeline or its CloudWatch log group if troubleshooting is needed.
+
+5. **Review the approval request**
+   - After a successful build, the pipeline pauses at **Waiting for approval**; deployment does not proceed until someone responds.
+   - The subscribed reviewer receives an email with the approval prompt, review context, and links to approve or reject.
+
+6. **Approve or reject**
+   - **Approve:** The pipeline continues to the deployment stage and deploys the built revision.
+   - **Reject:** The pipeline stops at the gate, preventing that revision from proceeding to deployment.
+
+7. **Verify the result**
+   - Check the pipeline’s final status and refresh the application to confirm the deployed change—for example, that it now displays `v2`.
+
+This pattern keeps routine source and build work automated while requiring an authorized person to review changes before they reach production.
+
+## Build env, Error simulation with pipeline
+
+### Steps shown in the video
+
+1. **Start with the existing pipeline**  
+   It connects CodeCommit (source), CodeBuild (build), a manual approval stage, and CodeDeploy (deployment).
+
+2. **Introduce a controlled build failure**  
+   In CodeBuild, change the build image from **Ubuntu Standard 3.0** to **Standard 4.0**, while leaving `buildspec.yml` configured with the `openjdk8` runtime.
+
+3. **Trigger the pipeline**  
+   Update `index.jsp` to display version `v3`, then commit and push the change to `master`. The push starts a new pipeline execution.
+
+4. **Inspect the failed build**  
+   Open the execution’s CodeBuild details and review its phase status and error message. The build reports `unknown runtime openjdk8` and lists the runtimes supported by the selected image, including Corretto Java 8 and 11. Since the build fails before deployment, the currently running application remains unchanged.
+
+5. **Correct the runtime configuration**  
+   Edit `buildspec.yml` in CodeCommit, changing `openjdk8` to `corretto8`, then commit the fix. That commit triggers another pipeline execution.
+
+6. **Approve the successful build**  
+   After CodeBuild succeeds, the pipeline pauses at the human approval stage. Review the change, approve it, and optionally add a comment documenting the runtime fix.
+
+7. **Verify deployment**  
+   CodeDeploy deploys the revision. Check its status and the application to confirm the version 3 update.
+
+**Takeaway:** The build image and `buildspec.yml` runtime must be compatible. CodePipeline surfaces the mismatch before deployment, so a build failure can be fixed without disrupting the live application.
